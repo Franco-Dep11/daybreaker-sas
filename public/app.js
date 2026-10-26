@@ -1,0 +1,834 @@
+const app = document.querySelector('#app');
+const toastBox = document.querySelector('#toast');
+const cartStorageKey = 'daybreaker-cart-v1';
+const statusText = {
+  received: 'Pedido recibido',
+  freight_quoted: 'Flete cotizado',
+  awaiting_payment: 'Total aceptado · pago pendiente',
+  payment_confirmed: 'Pago confirmado',
+  preparing: 'En preparación',
+  dispatched: 'Despachado',
+  delivered: 'Entregado',
+  canceled: 'Cancelado',
+  pending: 'Pendiente',
+  responded: 'Respondida',
+  closed: 'Cerrada',
+  pending_verification: 'A verificar',
+  confirmed: 'Confirmado',
+  failed: 'Fallido',
+};
+
+const state = {
+  config: { contactEmail: '', whatsappPhone: '', transferEnabled: false, mercadopagoEnabled: false, adminEnabled: false, readOnlyPreview: false },
+  products: [],
+  cart: loadCart(),
+  quoteDraft: [],
+  admin: { authenticated: false, tab: 'products', productEdit: null, orders: [], quotes: [], products: [], filter: {} },
+  toastTimer: 0,
+  routeVersion: 0,
+};
+
+function loadCart() {
+  try {
+    const value = JSON.parse(localStorage.getItem(cartStorageKey) || '{}');
+    return value && typeof value === 'object' ? value : {};
+  } catch { return {}; }
+}
+
+function saveCart() {
+  localStorage.setItem(cartStorageKey, JSON.stringify(state.cart));
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
+
+function money(cents) {
+  if (cents === null || cents === undefined) return 'A cotizar';
+  return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 2 }).format(cents / 100);
+}
+
+function moneyInput(cents) {
+  return (cents / 100).toFixed(2).replace('.', ',');
+}
+
+function dateTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat('es-AR', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || 'GET',
+    credentials: 'same-origin',
+    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'No se pudo completar la solicitud.');
+  return data;
+}
+
+function showToast(message) {
+  toastBox.textContent = message;
+  toastBox.classList.add('is-visible');
+  window.clearTimeout(state.toastTimer);
+  state.toastTimer = window.setTimeout(() => toastBox.classList.remove('is-visible'), 3600);
+}
+
+function setRoute(route) {
+  const paths = {
+    inicio: '/', 'quienes-somos': '/quienes-somos', catalogo: '/catalogo',
+    presupuestos: '/presupuestos-mayoristas', carrito: '/carrito', contacto: '/contacto',
+  };
+  const target = route === 'admin' ? '/#admin' : (paths[route] || '/');
+  window.history.pushState({}, '', target);
+  render();
+}
+
+function navActive(route) {
+  document.querySelectorAll('[data-route]').forEach(link => {
+    if (link.dataset.route === route) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+}
+
+function shell(content, route = '') {
+  navActive(route);
+  const previewNotice = state.config.readOnlyPreview
+    ? '<div class="deployment-notice notice" role="status"><div><strong>Vista de publicación.</strong> Esta versión permite recorrer la web. Los pedidos, presupuestos y cambios del panel se habilitarán al conectar una base de datos persistente.</div></div>'
+    : '';
+  return `${previewNotice}${content}`;
+}
+
+function heroPage() {
+  const count = Object.keys(state.cart).reduce((sum, id) => sum + (Number(state.cart[id]) || 0), 0);
+  return shell(`
+    <section class="hero">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <span class="eyebrow">DAYBREAKER SAS · Argentina</span>
+          <h1>Comercio claro.<br><em>Operación confiable.</em></h1>
+          <p class="hero-lede">Catálogo minorista y atención mayorista, con precios visibles y envío cotizado antes de confirmar el pago.</p>
+          <div class="hero-actions">
+            <a class="button button-accent" href="/catalogo">Explorar catálogo <span aria-hidden="true">→</span></a>
+            <a class="button button-outline" href="/presupuestos-mayoristas">Solicitar presupuesto</a>
+          </div>
+          <div class="hero-footnote"><span>Compra sin cuenta</span><span>Envíos a toda Argentina</span><span>Flete a cotizar</span></div>
+        </div>
+      </div>
+    </section>
+    <div class="feature-strip">
+      <div class="feature-cell"><strong>Precio minorista visible</strong><span>El precio final de productos se muestra en pesos argentinos.</span></div>
+      <div class="feature-cell"><strong>Flete informado antes del pago</strong><span>Confirmás el total una vez que DAYBREAKER cotiza el transporte.</span></div>
+      <div class="feature-cell"><strong>Atención mayorista</strong><span>Enviá productos y cantidades; la respuesta es personalizada.</span></div>
+    </div>
+    <section class="section">
+      <div class="section-shell split-layout">
+        <div>
+          <span class="eyebrow">Una forma simple de operar</span>
+          <h2>Elegí cómo querés avanzar.</h2>
+          <p>Comprá unidades con precio minorista o reuní varios productos en una consulta mayorista. En compras minoristas, el costo de envío se cotiza según destino y volumen antes de habilitar el pago.</p>
+          <div class="hero-actions">
+            <a class="button button-dark" href="/catalogo">Ver catálogo</a>
+            <a class="button button-outline" href="/carrito">Carrito${count ? ` · ${count}` : ''} y seguimiento</a>
+          </div>
+        </div>
+        <div class="industrial-card" aria-label="DAYBREAKER, atención comercial en toda Argentina">
+          <span class="industrial-card-label">Atención comercial</span>
+          <h3>Minorista y mayorista, en un mismo lugar.</h3>
+          <span class="industrial-card-number">DB / AR</span>
+        </div>
+      </div>
+    </section>
+    <section class="section section-compact home-how">
+      <div class="section-shell">
+        <div class="section-heading"><span class="eyebrow">Cómo funciona</span><h2>Un proceso simple y transparente.</h2></div>
+        <div class="process-grid">
+          <article class="process-item"><span>01 / ELEGÍ</span><h3>Armá tu pedido</h3><p>Sumá productos al carrito sin crear una cuenta o consultá cantidades para una compra mayorista.</p></article>
+          <article class="process-item"><span>02 / CONFIRMÁ</span><h3>Recibí el costo de envío</h3><p>DAYBREAKER cotiza el flete y te comunica el total. Ningún pedido se cobra antes de tu aceptación.</p></article>
+          <article class="process-item"><span>03 / SEGUÍ</span><h3>Pagá y consultá el estado</h3><p>Elegí un medio de pago habilitado y usá tu enlace privado para ver el avance del pedido.</p></article>
+        </div>
+      </div>
+    </section>`, 'inicio');
+}
+
+function aboutPage() {
+  return shell(`
+    <section class="section"><div class="section-shell">
+      <div class="section-heading"><span class="eyebrow">Quiénes somos</span><h1>DAYBREAKER SAS</h1>
+        <p>Un espacio de atención comercial para compras minoristas y consultas mayoristas en Argentina.</p>
+      </div>
+      <div class="split-layout">
+        <div><h2>Información comercial directa.</h2><p>El sitio reúne catálogo, pedidos y solicitudes de presupuesto en una sola experiencia. Los precios minoristas se publican en pesos argentinos; las condiciones mayoristas se conversan caso por caso.</p><p>Los datos institucionales, la historia de la empresa y cualquier otra información corporativa se incorporarán cuando DAYBREAKER autorice el contenido definitivo.</p><a class="button button-dark" href="/contacto">Contactar al equipo</a></div>
+        <div class="industrial-card"><span class="industrial-card-label">Servicio comercial</span><h3>Atención para clientes de todo el país.</h3><span class="industrial-card-number">DAYBREAKER SAS</span></div>
+      </div>
+    </div></section>`, 'quienes-somos');
+}
+
+function availabilityBadge(value) {
+  if (value === 'available') return '<span class="badge">Disponible</span>';
+  if (value === 'on_request') return '<span class="badge badge-warn">A pedido</span>';
+  return '<span class="badge badge-muted">Agotado</span>';
+}
+
+function productCard(product) {
+  const image = product.imageUrl
+    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}" loading="lazy">`
+    : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
+  const canBuy = product.availability === 'available';
+  return `<article class="product-card">
+    <a class="product-image" href="/productos/${encodeURIComponent(product.slug)}" aria-label="Ver ${escapeHtml(product.name)}">
+      ${image}${availabilityBadge(product.availability)}
+    </a>
+    <div class="product-content">
+      <h3><a href="/productos/${encodeURIComponent(product.slug)}">${escapeHtml(product.name)}</a></h3>
+      <p>${escapeHtml(product.shortDescription || 'Consultá las especificaciones y disponibilidad de este producto.')}</p>
+      <span class="product-price-label">Precio minorista</span><strong class="product-price">${money(product.retailPriceCents)}</strong>
+      <div class="product-actions">
+        ${canBuy ? `<button class="button button-dark button-block" type="button" data-action="add-cart" data-product-id="${escapeHtml(product.id)}">Agregar al carrito</button>` : `<button class="button button-outline button-block" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Consultar disponibilidad</button>`}
+        <a class="button button-outline button-block" href="/productos/${encodeURIComponent(product.slug)}">Ver ficha <span aria-hidden="true">↗</span></a>
+        <button class="text-button" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Solicitar cotización mayorista</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function catalogPage() {
+  const products = state.products;
+  const body = products.length
+    ? `<div class="catalog-toolbar"><div><span class="eyebrow">Compra minorista</span><h2>Productos</h2></div><label class="field search-field"><span class="field-label">Buscar en el catálogo</span><input id="catalog-search" type="search" placeholder="Nombre o descripción" autocomplete="off"></label></div>
+       <div class="product-grid" id="product-grid">${products.map(productCard).join('')}</div>
+       <div class="empty-state" id="catalog-no-results" hidden><h3>No encontramos coincidencias.</h3><p>Probá con otro término o solicitá un presupuesto mayorista.</p><a class="button button-outline" href="/presupuestos-mayoristas">Solicitar presupuesto</a></div>`
+    : `<div class="empty-state"><span class="empty-state-icon" aria-hidden="true">＋</span><h3>El catálogo se está preparando.</h3><p>Cuando DAYBREAKER cargue los productos, precios y materiales autorizados, aparecerán aquí con sus fichas y opciones de compra. No se publican importes estimados.</p></div>`;
+  return shell(`<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Catálogo</span><h1>Productos y soluciones</h1><p>Precios minoristas en pesos argentinos. El costo de transporte se cotiza por separado según el destino.</p></div>${body}</div></section>`, 'catalogo');
+}
+
+function productPageMarkup(product) {
+  const image = product.imageUrl
+    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}">`
+    : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
+  const canBuy = product.availability === 'available';
+  return shell(`<section class="section"><div class="section-shell">
+    <p class="kicker"><a href="/catalogo">Catálogo</a> / Ficha de producto</p>
+    <div class="split-layout product-detail-layout">
+      <div class="product-image product-detail-image">${image}${availabilityBadge(product.availability)}</div>
+      <div><span class="eyebrow">Ficha de producto</span><h1 class="product-title">${escapeHtml(product.name)}</h1>
+        ${availabilityBadge(product.availability)}<p class="product-description">${escapeHtml(product.shortDescription || 'La descripción comercial se completará con los datos aprobados por DAYBREAKER.')}</p>
+        <span class="product-price-label">Precio minorista</span><strong class="product-price product-price-detail">${money(product.retailPriceCents)}</strong>
+        ${product.specifications ? `<div class="panel-card specification-panel"><h2>Especificaciones</h2><p>${escapeHtml(product.specifications)}</p></div>` : ''}
+        <p class="product-shipping-note">El transporte se cotiza según domicilio, volumen y cantidad. El pago queda habilitado después de aceptar el total final.</p>
+        <div class="hero-actions">${canBuy ? `<button class="button button-accent" type="button" data-action="add-cart" data-product-id="${escapeHtml(product.id)}">Agregar al carrito</button>` : '<span class="badge badge-warn">Consultá disponibilidad</span>'}<button class="button button-outline" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Cotizar al por mayor</button></div>
+        ${product.technicalPdfUrl ? `<p><a href="${escapeHtml(product.technicalPdfUrl)}" target="_blank" rel="noopener noreferrer">Abrir ficha técnica PDF ↗</a></p>` : ''}
+      </div>
+    </div></div></section>`, 'catalogo');
+}
+
+function quoteRow(index, selected = {}) {
+  const options = state.products.map(product => `<option value="${escapeHtml(product.id)}" ${selected.productId === product.id ? 'selected' : ''}>${escapeHtml(product.name)}</option>`).join('');
+  const defaultCustom = state.products.length ? '' : 'custom';
+  return `<div class="quote-item-row" data-quote-row="${index}">
+    <div class="field"><label for="quote-product-${index}">Producto</label><select id="quote-product-${index}" name="productId" data-quote-select required>
+      ${state.products.length ? '<option value="">Elegí del catálogo</option>' : '<option value="custom">Indicar producto</option>'}
+      ${options}<option value="custom" ${(selected.productId === 'custom' || defaultCustom === 'custom') ? 'selected' : ''}>Otro producto / indicar</option>
+    </select><input name="productName" aria-label="Producto solicitado" placeholder="Nombre o descripción del producto" value="${escapeHtml(selected.productName || '')}" ${selected.productId && selected.productId !== 'custom' ? 'hidden' : ''} ${selected.productId === 'custom' || !state.products.length ? 'required' : ''}></div>
+    <div class="field"><label for="quote-qty-${index}">Cantidad</label><input id="quote-qty-${index}" name="quantity" type="number" min="1" max="9999" value="${escapeHtml(selected.quantity || 1)}" required></div>
+    <button class="remove-row" type="button" data-action="remove-quote-row" aria-label="Quitar producto">Quitar</button>
+  </div>`;
+}
+
+function quotePage() {
+  if (!state.quoteDraft.length) state.quoteDraft = [{ productId: state.products.length ? '' : 'custom', productName: '', quantity: 1 }];
+  return shell(`<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Presupuestos mayoristas</span><h1>Contanos qué necesitás.</h1><p>Enviá productos, cantidades y destino. DAYBREAKER revisará la solicitud y te responderá de forma manual por email o WhatsApp.</p></div>
+    <div class="quote-layout"><form class="form-card" id="quote-form"><h2>Solicitar presupuesto</h2><p class="form-intro">No necesitás crear una cuenta. Los campos marcados son necesarios para responderte.</p>
+      <div class="form-grid">
+        <div class="field"><label for="quote-company">Razón social</label><input id="quote-company" name="companyName" maxlength="180" placeholder="Opcional si completás el contacto"></div>
+        <div class="field"><label for="quote-contact">Nombre de contacto</label><input id="quote-contact" name="contactName" maxlength="120" placeholder="Nombre y apellido"></div>
+        <div class="field"><label for="quote-cuit">CUIT</label><input id="quote-cuit" name="cuit" maxlength="16" placeholder="Opcional"></div>
+        <div class="field"><label for="quote-phone">Teléfono</label><input id="quote-phone" name="phone" autocomplete="tel" maxlength="80" required></div>
+        <div class="field"><label for="quote-email">Email</label><input id="quote-email" name="email" type="email" autocomplete="email" maxlength="254" required></div>
+        <div class="field"><label for="quote-destination">Destino</label><input id="quote-destination" name="destination" maxlength="240" placeholder="Localidad, provincia y código postal" required></div>
+        <div class="field field-full"><span class="field-label">Productos y cantidades</span><div class="quote-items" id="quote-items">${state.quoteDraft.map((item, index) => quoteRow(index, item)).join('')}</div><button class="button button-outline button-small" type="button" data-action="add-quote-row">＋ Agregar producto</button></div>
+        <div class="field field-full"><label for="quote-notes">Observaciones</label><textarea id="quote-notes" name="notes" maxlength="1200" placeholder="Contanos detalles que nos ayuden a preparar la respuesta."></textarea></div>
+      </div>
+      <div id="quote-error" class="form-error" role="alert" hidden></div>
+      <div class="form-actions"><button class="button button-accent" type="submit">Enviar solicitud <span aria-hidden="true">→</span></button><span class="field-help">Tu solicitud se guarda para que el equipo pueda gestionarla.</span></div>
+      <div id="quote-result" class="quote-result" aria-live="polite"></div>
+    </form>
+    <aside class="quote-side"><span class="eyebrow">Atención personalizada</span><h3>Presupuesto a medida.</h3><p>La cotización mayorista se gestiona por separado de los pedidos minoristas. El precio mayorista no se calcula ni se publica automáticamente.</p><ul><li>Identificación y fecha de solicitud</li><li>Productos y cantidades seleccionados</li><li>Respuesta manual por email o WhatsApp</li><li>Sin compromiso de compra</li></ul></aside></div></div></section>`, 'presupuestos');
+}
+
+function cartPage() {
+  const entries = Object.entries(state.cart).filter(([id, qty]) => Number(qty) > 0).map(([id, qty]) => ({ product: state.products.find(item => item.id === id), quantity: Number(qty) })).filter(row => row.product);
+  const total = entries.reduce((sum, row) => sum + row.product.retailPriceCents * row.quantity, 0);
+  const lostItems = Object.keys(state.cart).some(id => !state.products.some(product => product.id === id));
+  const staleRows = Object.keys(state.cart).filter(id => !state.products.some(product => product.id === id)).map(id => `<div class="cart-line"><div><h3>Producto retirado del catálogo</h3><p>Quitalo para continuar con el pedido.</p></div><strong class="badge badge-muted">No disponible</strong><button class="remove-row" type="button" data-action="remove-cart" data-product-id="${escapeHtml(id)}">Quitar</button></div>`).join('');
+  const unavailableItems = entries.some(row => row.product.availability !== 'available');
+  const itemsMarkup = entries.length ? entries.map(row => `<div class="cart-line">
+    <div><h3>${escapeHtml(row.product.name)}</h3><p>${money(row.product.retailPriceCents)} por unidad · ${escapeHtml(row.product.availability === 'available' ? 'Disponible' : 'No disponible para compra')}</p></div>
+    <label class="field"><span class="field-label">Unidades</span><input type="number" min="1" max="9999" value="${row.quantity}" data-cart-qty="${escapeHtml(row.product.id)}" aria-label="Cantidad de ${escapeHtml(row.product.name)}"></label>
+    <strong class="cart-line-total">${money(row.product.retailPriceCents * row.quantity)}</strong>
+    <button class="remove-row" type="button" data-action="remove-cart" data-product-id="${escapeHtml(row.product.id)}">Quitar</button>
+  </div>`).join('') : staleRows ? '<div class="notice">El carrito tiene productos que ya no están disponibles.</div>' : `<div class="empty-state"><span class="empty-state-icon" aria-hidden="true">▱</span><h3>Tu carrito está vacío.</h3><p>Explorá el catálogo y agregá productos disponibles. También podés pedir una cotización mayorista sin iniciar una compra.</p><a class="button button-dark" href="/catalogo">Ir al catálogo</a></div>`;
+  const checkout = entries.length && (unavailableItems || lostItems) ? `<div class="notice">Quitá los productos retirados o que no estén disponibles para compra antes de continuar.</div>` : entries.length ? `<form class="cart-customer-form form-card" id="checkout-form"><h2>Datos de entrega</h2><p class="form-intro">Completá los datos para registrar el pedido. El importe cobrado queda bloqueado hasta que DAYBREAKER cotice el flete y vos aceptes el total.</p>
+    <div class="form-grid">
+      <div class="field"><label for="order-name">Nombre y apellido</label><input id="order-name" name="customerName" autocomplete="name" maxlength="120" required></div>
+      <div class="field"><label for="order-email">Email</label><input id="order-email" name="email" type="email" autocomplete="email" maxlength="254" required></div>
+      <div class="field"><label for="order-phone">Teléfono</label><input id="order-phone" name="phone" autocomplete="tel" maxlength="80" required></div>
+      <div class="field"><label for="order-postal">Código postal</label><input id="order-postal" name="postalCode" autocomplete="postal-code" maxlength="24" required></div>
+      <div class="field field-full"><label for="order-address">Domicilio de entrega</label><input id="order-address" name="address" autocomplete="street-address" maxlength="240" required></div>
+      <div class="field"><label for="order-locality">Localidad</label><input id="order-locality" name="locality" autocomplete="address-level2" maxlength="120" required></div>
+      <div class="field"><label for="order-province">Provincia</label><input id="order-province" name="province" autocomplete="address-level1" maxlength="120" required></div>
+      <div class="field field-full"><label for="order-notes">Observaciones</label><textarea id="order-notes" name="notes" maxlength="1000" placeholder="Indicaciones para la entrega (opcional)"></textarea></div>
+    </div>
+    <div class="notice notice-dark notice-cart-total">El total inicial de <strong>${money(total)}</strong> corresponde solo a productos. El pago no se habilita hasta que recibas y aceptes el flete cotizado.</div>
+    <div id="checkout-error" class="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button class="button button-accent" type="submit">Enviar pedido para cotizar el flete</button><span class="field-help">Compra sin registro · Seguimiento privado por enlace.</span></div>
+  </form>` : '';
+  return shell(`<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Carrito y seguimiento</span><h1>Tu compra, paso a paso.</h1><p>Revisá cantidades, completá el destino y recibí una cotización de envío antes de pagar.</p></div>
+    <div class="cart-layout"><div><div class="cart-items">${itemsMarkup}${staleRows}</div>${lostItems ? '<p class="form-error">Un producto ya no está disponible. Quitalo del carrito para continuar.</p>' : ''}${checkout}</div>
+      <aside class="cart-summary"><h2>Resumen</h2><div class="summary-row"><span>Productos</span><strong>${money(total)}</strong></div><div class="summary-row"><span>Envío</span><strong>A cotizar</strong></div><div class="summary-row summary-total"><span>Total a pagar</span><strong>A confirmar</strong></div><p class="field-help">El total final se muestra después de la cotización de flete.</p><hr class="form-divider"><h3 class="cart-track-heading">¿Ya tenés un pedido?</h3><p class="field-help">Abrí el enlace privado que recibiste para consultar su estado.</p><button class="button button-outline button-small" type="button" data-action="open-track">Consultar seguimiento</button></aside>
+    </div>
+    <div class="section-compact"><div class="panel-card"><h2>Seguimiento seguro</h2><p class="form-intro">El número de pedido por sí solo no permite acceder a tus datos. El seguimiento usa un enlace privado no adivinable.</p><form id="manual-track-form" class="form-grid"><div class="field"><label for="track-code">Código de pedido</label><input id="track-code" name="id" maxlength="32" required></div><div class="field"><label for="track-token">Token del enlace privado</label><input id="track-token" name="token" minlength="40" maxlength="100" required></div><div class="field field-full"><button class="button button-dark" type="submit">Consultar pedido</button></div><div id="track-error" class="form-error field-full" role="alert" hidden></div></form></div></div>
+  </div></section>`, 'carrito');
+}
+
+function contactPage() {
+  const emailMarkup = state.config.contactEmail
+    ? `<a href="mailto:${encodeURIComponent(state.config.contactEmail)}">${escapeHtml(state.config.contactEmail)}</a>`
+    : '<p>El email comercial autorizado se publicará cuando DAYBREAKER confirme los datos de contacto.</p>';
+  const phoneMarkup = state.config.whatsappPhone
+    ? `<a href="https://wa.me/${escapeHtml(state.config.whatsappPhone)}" target="_blank" rel="noopener noreferrer">Abrir WhatsApp ↗</a>`
+    : '<p>El canal de WhatsApp estará disponible cuando se confirme el número comercial.</p>';
+  return shell(`<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Contacto</span><h1>Hablemos de tu consulta.</h1><p>Para consultas minoristas, mayoristas o de seguimiento, elegí el canal disponible.</p></div>
+    <div class="contact-layout"><div class="contact-grid">
+      <article class="contact-card"><span class="contact-icon" aria-hidden="true">@</span><h3>Email</h3>${emailMarkup}</article>
+      <article class="contact-card"><span class="contact-icon" aria-hidden="true">W</span><h3>WhatsApp</h3>${phoneMarkup}<p>Las respuestas comerciales se gestionan manualmente.</p></article>
+    </div><aside class="quote-side"><span class="eyebrow">Cobertura</span><h3>Atención en toda Argentina</h3><p>El transporte se cotiza previamente según destino, volumen y cantidad. No se cobra el total hasta que el cliente acepta la cotización.</p><a class="button button-accent quote-side-cta" href="/presupuestos-mayoristas">Pedir un presupuesto</a></aside></div>
+  </div></section>`, 'contacto');
+}
+
+function statusBadge(status) {
+  const label = statusText[status] || status;
+  const className = ['canceled', 'failed'].includes(status) ? 'badge badge-warn' : ['confirmed', 'payment_confirmed', 'delivered'].includes(status) ? 'badge' : 'badge badge-muted';
+  return `<span class="${className}">${escapeHtml(label)}</span>`;
+}
+
+function trackingTimeline(status) {
+  const steps = [
+    ['received', 'Recibido'], ['freight_quoted', 'Flete cotizado'], ['payment_confirmed', 'Pago confirmado'], ['preparing', 'Preparación'], ['dispatched', 'Despachado / entregado'],
+  ];
+  const rank = { received: 0, freight_quoted: 1, awaiting_payment: 1, payment_confirmed: 2, preparing: 3, dispatched: 4, delivered: 4, canceled: -1 };
+  const current = rank[status] ?? 0;
+  if (status === 'canceled') return `<div class="notice tracking-cancel-notice">Este pedido fue cancelado.</div>`;
+  return `<div class="tracking-timeline" aria-label="Estado del pedido">${steps.map(([key, label], index) => `<div class="timeline-step ${index <= current ? 'done' : ''}">${label}</div>`).join('')}</div>`;
+}
+
+function trackingResult(order, token) {
+  const paymentReturn = sessionStorage.getItem(`daybreaker-payment-return-${order.id}`);
+  const paymentMessage = paymentReturn
+    ? `<div class="notice notice-dark payment-return-notice">Volviste de Mercado Pago. El retorno del navegador no confirma un pago; el estado se actualizará cuando el servidor verifique la notificación oficial. Estado recibido: ${escapeHtml(paymentReturn)}.</div>`
+    : '';
+  const items = order.items.map(item => `<li><span>${escapeHtml(item.name)} × ${item.quantity}</span><strong>${money(item.lineTotalCents)}</strong></li>`).join('');
+  const paymentRows = order.payments.length ? `<div class="tracking-items"><h3 class="payment-list-heading">Pagos registrados</h3>${order.payments.map(payment => `<li><span>${payment.method === 'transfer' ? 'Transferencia' : 'Mercado Pago'} · ${escapeHtml(statusText[payment.status] || payment.status)}</span><strong>${money(payment.amountCents)}</strong></li>`).join('')}</div>` : '';
+  const canAccept = order.status === 'freight_quoted' && order.freightCents !== null;
+  const canPay = order.status === 'awaiting_payment' && order.freightAccepted;
+  const existingTransfer = order.payments.find(payment => payment.method === 'transfer' && payment.status === 'pending_verification');
+  const existingMp = order.payments.find(payment => payment.method === 'mercadopago' && payment.status === 'pending');
+  const payPanel = canPay ? `<section class="payment-panel"><h3>Elegí cómo pagar</h3><p>El total aceptado es ${money(order.totalCents)}. DAYBREAKER verificará el pago antes de confirmar el pedido.</p>
+    <div class="payment-methods">
+      ${order.paymentOptions.transfer ? `<button class="button button-outline button-small" type="button" data-action="pay-transfer" data-order-id="${escapeHtml(order.id)}">${existingTransfer ? 'Ver datos de transferencia' : 'Transferencia bancaria'}</button>` : ''}
+      ${order.paymentOptions.mercadopago ? `<button class="button button-accent button-small" type="button" data-action="pay-mercadopago" data-order-id="${escapeHtml(order.id)}">${existingMp ? 'Continuar con Mercado Pago' : 'Mercado Pago'}</button>` : ''}
+      ${!order.paymentOptions.transfer && !order.paymentOptions.mercadopago ? '<span class="notice">Los medios de pago se habilitarán cuando DAYBREAKER configure sus cuentas autorizadas.</span>' : ''}
+    </div><div id="bank-details"></div></section>` : '';
+  return `<article class="panel-card tracking-card">
+    <div class="tracking-header"><div><span class="field-help">Código de pedido</span><h2>${escapeHtml(order.id)}</h2></div>${statusBadge(order.status)}</div>
+    ${paymentMessage}${trackingTimeline(order.status)}
+    <div class="tracking-info">
+      <div class="info-tile"><span>Cliente</span><strong>${escapeHtml(order.customerName)}</strong></div>
+      <div class="info-tile"><span>Destino</span><strong>${escapeHtml(order.locality)}, ${escapeHtml(order.province)} · CP ${escapeHtml(order.postalCode)}</strong></div>
+      <div class="info-tile"><span>Fecha</span><strong>${dateTime(order.createdAt)}</strong></div>
+      <div class="info-tile"><span>Flete</span><strong>${money(order.freightCents)}</strong></div>
+      ${order.carrier ? `<div class="info-tile"><span>Transportista</span><strong>${escapeHtml(order.carrier)}</strong></div>` : ''}
+      ${order.shipmentTracking ? `<div class="info-tile"><span>Seguimiento de envío</span><strong>${escapeHtml(order.shipmentTracking)}</strong></div>` : ''}
+    </div>
+    <h3 class="tracking-products-heading">Productos</h3><ul class="tracking-items">${items}</ul>
+    <div class="summary-row"><span>Subtotal de productos</span><strong>${money(order.subtotalCents)}</strong></div>
+    <div class="summary-row"><span>Flete</span><strong>${money(order.freightCents)}</strong></div>
+    <div class="summary-row summary-total"><span>Total</span><strong>${money(order.totalCents)}</strong></div>
+    ${canAccept ? `<section class="payment-panel"><h3>El flete ya fue cotizado.</h3><p>Revisá el total final y aceptalo para habilitar los medios de pago.</p><p><strong>Productos ${money(order.subtotalCents)} + flete ${money(order.freightCents)} = ${money(order.totalCents)}</strong></p><button class="button button-accent button-small" type="button" data-action="accept-freight" data-order-id="${escapeHtml(order.id)}">Aceptar total y continuar</button></section>` : ''}
+    ${payPanel}${paymentRows}
+  </article>`;
+}
+
+async function trackingPage() {
+  navActive('carrito');
+  const orderId = decodeURIComponent(window.location.pathname.split('/').pop() || '');
+  const token = window.location.hash.slice(1);
+  let details = '';
+  if (token && orderId) {
+    try {
+      const order = await api('/api/track', { method: 'POST', body: { id: orderId, token } });
+      details = trackingResult(order, token);
+    } catch (error) {
+      details = `<div class="notice" role="alert">${escapeHtml(error.message)}</div>`;
+    }
+  } else {
+    details = `<div class="panel-card tracking-card"><h2>Usá tu enlace privado</h2><p class="form-intro">Ingresá el código y el token que aparecen en el enlace de seguimiento que recibiste. El código de pedido por sí solo no permite ver tus datos.</p><form id="manual-track-form" class="form-grid"><div class="field"><label for="track-code">Código de pedido</label><input id="track-code" name="id" value="${escapeHtml(orderId)}" maxlength="32" required></div><div class="field"><label for="track-token">Token del enlace privado</label><input id="track-token" name="token" minlength="40" maxlength="100" required></div><div class="field field-full"><button class="button button-dark" type="submit">Consultar pedido</button></div><div id="track-error" class="form-error field-full" role="alert" hidden></div></form></div>`;
+  }
+  return `<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Carrito y seguimiento</span><h1>Seguimiento de pedido</h1><p>Consultá el estado y el total de tu compra con el enlace privado que recibiste.</p></div>${details}<div class="tracking-back"><a class="button button-outline" href="/carrito">Volver al carrito</a></div></div></section>`;
+}
+
+function paymentReturnPage() {
+  const params = new URLSearchParams(window.location.search);
+  const orderId = params.get('pedido') || '';
+  const result = params.get('estado') || 'pendiente';
+  const token = sessionStorage.getItem(`daybreaker-tracking-${orderId}`);
+  if (orderId && token) {
+    sessionStorage.setItem(`daybreaker-payment-return-${orderId}`, result);
+    window.history.replaceState({}, '', `/seguimiento/${encodeURIComponent(orderId)}#${encodeURIComponent(token)}`);
+    return trackingPage();
+  }
+  return `<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Estado de pago</span><h1>Estamos verificando el pago.</h1><p>El retorno del navegador desde Mercado Pago no confirma que el pago haya sido aprobado. La confirmación se registra cuando el servidor valida la notificación oficial.</p></div><div class="notice notice-dark">Guardá el enlace privado de seguimiento que recibiste con el pedido para consultar el estado actualizado.</div><a class="button button-dark payment-return-back" href="/carrito">Volver al sitio</a></div></section>`;
+}
+
+function moneyStatus(order) { return statusText[order.status] || order.status; }
+
+function productForm(product = null) {
+  const editing = Boolean(product);
+  return `<form class="panel-card admin-product-form" id="admin-product-form" data-product-id="${editing ? escapeHtml(product.id) : ''}">
+    <h2>${editing ? 'Editar producto' : 'Agregar producto'}</h2><p class="form-intro">Ingresá el precio minorista vigente; el panel lo guardará en centavos para evitar diferencias de redondeo. No se cargan imágenes ni archivos en esta etapa.</p>
+    <div class="admin-product-grid">
+      <div class="field"><label for="admin-product-name">Nombre</label><input id="admin-product-name" name="name" value="${escapeHtml(product?.name || '')}" maxlength="120" required></div>
+      <div class="field"><label for="admin-product-slug">URL</label><input id="admin-product-slug" name="slug" value="${escapeHtml(product?.slug || '')}" maxlength="120" placeholder="Se genera desde el nombre"></div>
+      <div class="field"><label for="admin-product-price">Precio minorista (ARS)</label><input id="admin-product-price" name="retailPrice" value="${product ? moneyInput(product.retailPriceCents) : ''}" inputmode="decimal" placeholder="12.345,67" required></div>
+      <div class="field"><label for="admin-product-availability">Disponibilidad</label><select id="admin-product-availability" name="availability"><option value="available" ${product?.availability === 'available' ? 'selected' : ''}>Disponible</option><option value="sold_out" ${product?.availability === 'sold_out' ? 'selected' : ''}>Agotado</option><option value="on_request" ${product?.availability === 'on_request' ? 'selected' : ''}>A pedido</option></select></div>
+      <div class="field field-full"><label for="admin-product-description">Descripción breve</label><textarea id="admin-product-description" name="shortDescription" maxlength="1000">${escapeHtml(product?.shortDescription || '')}</textarea></div>
+      <div class="field field-full"><label for="admin-product-specs">Especificaciones técnicas</label><textarea id="admin-product-specs" name="specifications" maxlength="5000">${escapeHtml(product?.specifications || '')}</textarea></div>
+      ${editing ? `<label class="field field-full active-product-label"><input type="checkbox" name="active" ${product.active ? 'checked' : ''}> Producto visible en el catálogo</label>` : ''}
+    </div><div id="admin-product-error" class="form-error" role="alert" hidden></div>
+    <div class="form-actions"><button class="button button-accent" type="submit">${editing ? 'Guardar cambios' : 'Guardar producto'}</button>${editing ? '<button class="button button-outline" type="button" data-action="cancel-product-edit">Cancelar</button>' : ''}</div>
+  </form>`;
+}
+
+function orderCard(order) {
+  const paymentList = order.payments.length ? order.payments.map(payment => `<div class="admin-meta"><span>${payment.method === 'transfer' ? 'Transferencia' : 'Mercado Pago'}</span><span>${money(payment.amountCents)}</span><span>${escapeHtml(statusText[payment.status] || payment.status)}</span>${payment.providerReference ? `<span>Ref. ${escapeHtml(payment.providerReference)}</span>` : ''}</div>${payment.method === 'transfer' && payment.status === 'pending_verification' ? `<button class="button button-outline button-small" type="button" data-action="confirm-transfer" data-payment-id="${escapeHtml(payment.id)}">Confirmar transferencia verificada</button>` : ''}`).join('') : '<p>Sin pagos registrados.</p>';
+  const hasActivePayment = order.payments.some(payment => payment.status !== 'failed');
+  const statusChoices = order.status === 'payment_confirmed' ? ['preparing']
+    : order.status === 'preparing' ? ['dispatched']
+      : order.status === 'dispatched' ? ['delivered']
+        : hasActivePayment ? [] : ['canceled'];
+  const canQuote = !['payment_confirmed', 'preparing', 'dispatched', 'delivered', 'canceled'].includes(order.status) && !order.payments.some(payment => payment.status !== 'failed');
+  const customerPhone = order.phone.replace(/\D/g, '');
+  return `<article class="admin-item">
+    <div class="admin-item-head"><div><h3>Pedido ${escapeHtml(order.id)}</h3><p>${escapeHtml(order.customerName)} · ${escapeHtml(order.email)} · ${escapeHtml(order.phone)}</p></div>${statusBadge(order.status)}</div>
+    <div class="admin-meta"><span>${dateTime(order.createdAt)}</span><span>${escapeHtml(order.locality)}, ${escapeHtml(order.province)} · CP ${escapeHtml(order.postalCode)}</span><span>Productos ${money(order.subtotalCents)}</span><span>Flete ${money(order.freightCents)}</span><strong>Total ${money(order.totalCents)}</strong></div>
+    <div class="admin-actions"><a class="button button-outline button-small" href="mailto:${encodeURIComponent(order.email)}?subject=${encodeURIComponent(`Pedido DAYBREAKER ${order.id}`)}">Contactar por email</a>${customerPhone ? `<a class="button button-outline button-small" target="_blank" rel="noopener noreferrer" href="https://wa.me/${escapeHtml(customerPhone)}?text=${encodeURIComponent(`Hola, te contacto por tu pedido DAYBREAKER ${order.id}.`)}">Abrir WhatsApp</a>` : ''}</div>
+    <details class="admin-details"><summary>Ver productos y datos de entrega</summary><p><strong>Domicilio:</strong> ${escapeHtml(order.address)}</p><p><strong>Productos:</strong> ${order.items.map(item => `${escapeHtml(item.name)} × ${item.quantity} (${money(item.lineTotalCents)})`).join(' · ')}</p>${order.notes ? `<p><strong>Observaciones:</strong> ${escapeHtml(order.notes)}</p>` : ''}${order.carrier ? `<p><strong>Transportista:</strong> ${escapeHtml(order.carrier)} ${escapeHtml(order.shipmentTracking)}</p>` : ''}<p><strong>Enlace de seguimiento:</strong> se vuelve a mostrar al cliente al crear el pedido; por seguridad no se almacena el token en el panel.</p></details>
+    <div class="admin-details"><strong class="admin-payment-label">Pagos</strong>${paymentList}</div>
+    ${canQuote ? `<form class="admin-inline-form" data-admin-form="freight" data-order-id="${escapeHtml(order.id)}"><div class="field"><label>Flete (ARS)</label><input name="freight" inputmode="decimal" placeholder="12.345,67" required></div><div class="field"><label>Transportista (opcional)</label><input name="carrier" maxlength="120"></div><div class="field"><label>N.º seguimiento (opcional)</label><input name="shipmentTracking" maxlength="180"></div><button class="button button-accent button-small" type="submit">Informar flete</button></form>` : ''}
+    ${order.status !== 'delivered' && order.status !== 'canceled' && statusChoices.length ? `<form class="admin-inline-form" data-admin-form="order-status" data-order-id="${escapeHtml(order.id)}"><div class="field"><label>Actualizar estado</label><select name="status">${statusChoices.filter(value => value !== order.status).map(value => `<option value="${value}">${escapeHtml(statusText[value])}</option>`).join('')}</select></div><button class="button button-outline button-small" type="submit">Guardar estado</button></form>` : ''}
+  </article>`;
+}
+
+function quoteCard(quote) {
+  const customerPhone = quote.phone.replace(/\D/g, '');
+  return `<article class="admin-item">
+    <div class="admin-item-head"><div><h3>Solicitud ${escapeHtml(quote.id)}</h3><p>${escapeHtml(quote.companyName || quote.contactName)}${quote.companyName && quote.contactName ? ` · ${escapeHtml(quote.contactName)}` : ''}</p></div>${statusBadge(quote.status)}</div>
+    <div class="admin-meta"><span>${dateTime(quote.createdAt)}</span><span>${escapeHtml(quote.email)}</span><span>${escapeHtml(quote.phone)}</span><span>${escapeHtml(quote.destination)}</span>${quote.cuit ? `<span>CUIT ${escapeHtml(quote.cuit)}</span>` : ''}</div>
+    <details class="admin-details"><summary>Ver productos y observaciones</summary><p><strong>Productos:</strong> ${quote.items.map(item => `${escapeHtml(item.name)} × ${item.quantity}`).join(' · ')}</p>${quote.notes ? `<p><strong>Observaciones:</strong> ${escapeHtml(quote.notes)}</p>` : ''}</details>
+    <div class="admin-actions"><a class="button button-outline button-small" href="mailto:${encodeURIComponent(quote.email)}?subject=${encodeURIComponent(`Presupuesto DAYBREAKER ${quote.id}`)}">Responder por email</a>${customerPhone ? `<a class="button button-outline button-small" target="_blank" rel="noopener noreferrer" href="https://wa.me/${escapeHtml(customerPhone)}?text=${encodeURIComponent(`Hola, te contacto por el presupuesto DAYBREAKER ${quote.id}.`)}">Abrir WhatsApp</a>` : ''}</div>
+    <form class="admin-inline-form" data-admin-form="quote-status" data-quote-id="${escapeHtml(quote.id)}"><div class="field"><label>Estado interno</label><select name="status">${['pending','responded','closed'].map(value => `<option value="${value}" ${quote.status === value ? 'selected' : ''}>${escapeHtml(statusText[value])}</option>`).join('')}</select></div><button class="button button-outline button-small" type="submit">Guardar estado</button></form>
+  </article>`;
+}
+
+function adminTabs(active) {
+  const tabs = [['products', 'Productos'], ['orders', 'Pedidos'], ['quotes', 'Presupuestos']];
+  return `<div class="admin-tabs" role="tablist" aria-label="Secciones del panel">${tabs.map(([key, label]) => `<button class="admin-tab" type="button" role="tab" aria-selected="${active === key}" data-action="admin-tab" data-tab="${key}">${label}</button>`).join('')}</div>`;
+}
+
+function filteredOrders() {
+  const { query = '', status = '', date = '' } = state.admin.filter;
+  return state.admin.orders.filter(order => {
+    const haystack = `${order.id} ${order.customerName} ${order.email} ${order.phone} ${order.locality} ${order.province}`.toLowerCase();
+    return (!query || haystack.includes(query.toLowerCase())) && (!status || order.status === status) && (!date || order.createdAt.slice(0, 10) === date);
+  });
+}
+
+function filteredQuotes() {
+  const { query = '', status = '', date = '' } = state.admin.filter;
+  return state.admin.quotes.filter(quote => {
+    const haystack = `${quote.id} ${quote.companyName} ${quote.contactName} ${quote.email} ${quote.phone} ${quote.destination}`.toLowerCase();
+    return (!query || haystack.includes(query.toLowerCase())) && (!status || quote.status === status) && (!date || quote.createdAt.slice(0, 10) === date);
+  });
+}
+
+function renderAdminContent() {
+  const admin = state.admin;
+  if (admin.tab === 'products') {
+    const products = admin.products;
+    const list = products.length ? `<div class="admin-list">${products.map(product => `<article class="admin-item"><div class="admin-item-head"><div><h3>${escapeHtml(product.name)}</h3><p>/${escapeHtml(product.slug)}</p></div>${product.active ? availabilityBadge(product.availability) : '<span class="badge badge-muted">Archivado</span>'}</div><div class="admin-meta"><span>Precio: ${money(product.retailPriceCents)}</span><span>${product.active ? 'Visible en el catálogo' : 'No visible'}</span><span>Actualizado ${dateTime(product.updatedAt)}</span></div><div class="admin-actions"><button class="button button-outline button-small" type="button" data-action="edit-product" data-product-id="${escapeHtml(product.id)}">Editar</button>${product.active ? `<button class="button button-outline button-small" type="button" data-action="archive-product" data-product-id="${escapeHtml(product.id)}">Desactivar</button>` : ''}</div></article>`).join('')}</div>` : '<div class="empty-state"><h3>Aún no hay productos cargados.</h3><p>La ficha de producto, precio y disponibilidad ya están preparadas. Agregá un producto solo cuando DAYBREAKER confirme los datos vigentes.</p></div>';
+    return `${productForm(admin.productEdit)}<div class="admin-toolbar"><h2>Catálogo administrativo</h2><span class="badge badge-muted">${products.length} productos</span></div>${list}`;
+  }
+  if (admin.tab === 'orders') {
+    const orders = filteredOrders();
+    const list = orders.length ? `<div class="admin-list">${orders.map(orderCard).join('')}</div>` : '<div class="empty-state"><h3>No hay pedidos para mostrar.</h3><p>Los pedidos minoristas se guardan aquí de forma independiente de las solicitudes de presupuesto.</p></div>';
+    return `<div class="admin-toolbar"><h2>Pedidos minoristas</h2><span class="badge badge-muted">${orders.length} encontrados</span></div>
+      <form id="admin-filter-form" class="filter-row"><input class="filter-control" name="query" placeholder="Cliente, email o pedido" value="${escapeHtml(admin.filter.query || '')}"><select class="filter-control" name="status"><option value="">Todos los estados</option>${['received','freight_quoted','awaiting_payment','payment_confirmed','preparing','dispatched','delivered','canceled'].map(value => `<option value="${value}" ${admin.filter.status === value ? 'selected' : ''}>${escapeHtml(statusText[value])}</option>`).join('')}</select><input class="filter-control" type="date" name="date" aria-label="Filtrar por fecha" value="${escapeHtml(admin.filter.date || '')}"><button class="button button-dark button-small" type="submit">Filtrar</button><button class="button button-outline button-small" type="button" data-action="clear-admin-filter">Limpiar</button></form>${list}`;
+  }
+  const quotes = filteredQuotes();
+  const list = quotes.length ? `<div class="admin-list">${quotes.map(quoteCard).join('')}</div>` : '<div class="empty-state"><h3>No hay presupuestos para mostrar.</h3><p>Las solicitudes mayoristas quedan almacenadas aparte de los pedidos.</p></div>';
+  return `<div class="admin-toolbar"><h2>Solicitudes mayoristas</h2><span class="badge badge-muted">${quotes.length} encontradas</span></div><form id="admin-filter-form" class="filter-row"><input class="filter-control" name="query" placeholder="Empresa, contacto o email" value="${escapeHtml(admin.filter.query || '')}"><select class="filter-control" name="status"><option value="">Todos los estados</option>${['pending','responded','closed'].map(value => `<option value="${value}" ${admin.filter.status === value ? 'selected' : ''}>${escapeHtml(statusText[value])}</option>`).join('')}</select><input class="filter-control" type="date" name="date" aria-label="Filtrar por fecha" value="${escapeHtml(admin.filter.date || '')}"><button class="button button-dark button-small" type="submit">Filtrar</button><button class="button button-outline button-small" type="button" data-action="clear-admin-filter">Limpiar</button></form>${list}`;
+}
+
+async function adminPage() {
+  navActive('');
+  if (!state.config.adminEnabled) {
+    return `<section class="admin-shell"><div class="section-shell"><div class="panel-card admin-login"><span class="eyebrow">Panel interno</span><h1 class="admin-login-title">Acceso no habilitado</h1><p class="form-intro">Configurá una contraseña administrativa en el archivo local .env para abrir el panel. La contraseña no tiene un valor predeterminado.</p><a class="button button-outline" href="/">Volver al sitio</a></div></div></section>`;
+  }
+  try {
+    const session = await api('/api/admin/session');
+    state.admin.authenticated = session.authenticated;
+  } catch { state.admin.authenticated = false; }
+  if (!state.admin.authenticated) {
+    return `<section class="admin-shell"><div class="section-shell"><form id="admin-login-form" class="panel-card admin-login"><span class="eyebrow">Acceso restringido</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Ingresá la contraseña interna configurada para esta instalación.</p><div class="field"><label for="admin-password">Contraseña</label><input id="admin-password" name="password" type="password" autocomplete="current-password" minlength="16" required></div><div id="admin-login-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-dark" type="submit">Iniciar sesión</button><a class="button button-outline" href="/">Volver</a></div></form></div></section>`;
+  }
+  try {
+    const [products, orders, quotes] = await Promise.all([
+      api('/api/admin/products'), api('/api/admin/orders'), api('/api/admin/quotes'),
+    ]);
+    state.admin.products = products;
+    state.admin.orders = orders;
+    state.admin.quotes = quotes;
+  } catch (error) {
+    return `<section class="admin-shell"><div class="section-shell"><div class="notice">${escapeHtml(error.message)}</div></div></section>`;
+  }
+  const content = renderAdminContent();
+  const pendingOrders = state.admin.orders.filter(order => !['delivered','canceled'].includes(order.status)).length;
+  const pendingQuotes = state.admin.quotes.filter(quote => quote.status === 'pending').length;
+  return `<section class="admin-shell"><div class="section-shell">
+    <div class="admin-top"><div><span class="eyebrow">Operación DAYBREAKER</span><h1>Panel administrativo</h1></div><button class="button button-outline" type="button" data-action="admin-logout">Cerrar sesión</button></div>
+    <div class="feature-strip admin-summary"><div class="feature-cell"><strong>${state.admin.products.filter(product => product.active).length} productos activos</strong><span>Catálogo y precios minoristas</span></div><div class="feature-cell"><strong>${pendingOrders} pedidos abiertos</strong><span>Compras y pagos por verificar</span></div><div class="feature-cell"><strong>${pendingQuotes} presupuestos pendientes</strong><span>Consultas mayoristas</span></div></div>
+    ${adminTabs(state.admin.tab)}<div id="admin-content">${content}</div>
+  </div></section>`;
+}
+
+async function routePage() {
+  const pathname = decodeURI(window.location.pathname);
+  if ((pathname === '/' || pathname === '/index.html') && window.location.hash === '#admin') return adminPage();
+  const publicRoutes = {
+    '/': 'inicio', '/index.html': 'inicio', '/quienes-somos': 'quienes-somos',
+    '/catalogo': 'catalogo', '/presupuestos-mayoristas': 'presupuestos',
+    '/carrito': 'carrito', '/contacto': 'contacto',
+  };
+  const publicRoute = publicRoutes[pathname];
+  if (publicRoute === 'inicio') return heroPage();
+  if (publicRoute === 'quienes-somos') return aboutPage();
+  if (publicRoute === 'catalogo') return catalogPage();
+  if (publicRoute === 'presupuestos') return quotePage();
+  if (publicRoute === 'carrito') return cartPage();
+  if (publicRoute === 'contacto') return contactPage();
+  if (pathname.startsWith('/productos/')) {
+    const slug = pathname.slice('/productos/'.length);
+    try { return productPageMarkup(await api(`/api/products/${encodeURIComponent(slug)}`)); }
+    catch (error) { return `<section class="section"><div class="section-shell"><div class="empty-state"><h1>Producto no encontrado</h1><p>${escapeHtml(error.message)}</p><a class="button button-dark" href="/catalogo">Volver al catálogo</a></div></div></section>`; }
+  }
+  if (pathname.startsWith('/seguimiento/')) return trackingPage();
+  if (pathname.startsWith('/pago/resultado')) return paymentReturnPage();
+  const route = window.location.hash.replace(/^#/, '') || 'inicio';
+  if (route === 'admin') return adminPage();
+  if (route === 'quienes-somos') return aboutPage();
+  if (route === 'catalogo') return catalogPage();
+  if (route === 'presupuestos') return quotePage();
+  if (route === 'carrito') return cartPage();
+  if (route === 'contacto') return contactPage();
+  return heroPage();
+}
+
+async function render() {
+  const version = ++state.routeVersion;
+  app.setAttribute('aria-busy', 'true');
+  try {
+    const content = await routePage();
+    if (version !== state.routeVersion) return;
+    app.innerHTML = content;
+    app.setAttribute('aria-busy', 'false');
+    if (window.location.pathname === '/presupuestos-mayoristas' && state.quoteDraft.length) {
+      document.querySelector('#quote-items')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  } catch (error) {
+    if (version !== state.routeVersion) return;
+    app.innerHTML = `<section class="section"><div class="section-shell"><div class="notice" role="alert">${escapeHtml(error.message || 'Ocurrió un problema al cargar la página.')}</div></div></section>`;
+    app.setAttribute('aria-busy', 'false');
+  }
+}
+
+function routeToTracking(id, token) {
+  window.history.pushState({}, '', `/seguimiento/${encodeURIComponent(id)}#${encodeURIComponent(token)}`);
+  render();
+}
+
+function quoteDraftFor(product) {
+  const existing = state.quoteDraft.filter(item => item.productName || (item.productId && item.productId !== 'custom'));
+  state.quoteDraft = [...existing, { productId: product.id, productName: product.name, quantity: 1 }];
+  setRoute('presupuestos');
+}
+
+async function handleAction(button) {
+  const action = button.dataset.action;
+  if (action === 'admin') return setRoute('admin');
+  if (action === 'add-cart') {
+    const product = state.products.find(item => item.id === button.dataset.productId);
+    if (!product || product.availability !== 'available') return showToast('Este producto no está disponible para compra.');
+    state.cart[product.id] = (Number(state.cart[product.id]) || 0) + 1;
+    saveCart(); showToast(`${product.name} se agregó al carrito.`);
+    if (window.location.pathname === '/carrito') render();
+    return;
+  }
+  if (action === 'remove-cart') {
+    delete state.cart[button.dataset.productId]; saveCart(); render(); return;
+  }
+  if (action === 'quote-product') {
+    const product = state.products.find(item => item.id === button.dataset.productId);
+    if (product) quoteDraftFor(product);
+    return;
+  }
+  if (action === 'add-quote-row') {
+    const rows = [...document.querySelectorAll('[data-quote-row]')].map(row => ({
+      productId: row.querySelector('[name="productId"]').value,
+      productName: row.querySelector('[name="productName"]').value,
+      quantity: row.querySelector('[name="quantity"]').value,
+    }));
+    state.quoteDraft = [...rows, { productId: state.products.length ? '' : 'custom', productName: '', quantity: 1 }];
+    render(); return;
+  }
+  if (action === 'remove-quote-row') {
+    const rows = [...document.querySelectorAll('[data-quote-row]')].filter(row => row !== button.closest('[data-quote-row]')).map(row => ({
+      productId: row.querySelector('[name="productId"]').value,
+      productName: row.querySelector('[name="productName"]').value,
+      quantity: row.querySelector('[name="quantity"]').value,
+    }));
+    if (!rows.length) rows.push({ productId: state.products.length ? '' : 'custom', productName: '', quantity: 1 });
+    state.quoteDraft = rows; render(); return;
+  }
+  if (action === 'open-track') {
+    setRoute('carrito');
+    setTimeout(() => document.querySelector('#manual-track-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 80);
+    return;
+  }
+  if (action === 'accept-freight') {
+    const token = window.location.hash.slice(1);
+    try {
+      await api('/api/track/accept-freight', { method: 'POST', body: { id: button.dataset.orderId, token } });
+      showToast('Aceptaste el total. Ya podés elegir un medio de pago.'); render();
+    } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'pay-transfer' || action === 'pay-mercadopago') {
+    const id = button.dataset.orderId;
+    const token = window.location.hash.slice(1);
+    button.disabled = true;
+    try {
+      const result = await api('/api/track/payment', { method: 'POST', body: { id, token, method: action === 'pay-transfer' ? 'transfer' : 'mercadopago' } });
+      if (action === 'pay-transfer') {
+        const target = document.querySelector('#bank-details');
+        if (target) target.innerHTML = bankMarkup(result.bankDetails, result.payment.amountCents);
+        showToast('La transferencia quedó pendiente de verificación.');
+      } else if (result.checkoutUrl) {
+        sessionStorage.setItem(`daybreaker-tracking-${id}`, token);
+        window.location.assign(result.checkoutUrl);
+      }
+    } catch (error) { showToast(error.message); }
+    finally { button.disabled = false; }
+    return;
+  }
+  if (action === 'admin-tab') {
+    state.admin.tab = button.dataset.tab;
+    state.admin.productEdit = null;
+    state.admin.filter = {};
+    render(); return;
+  }
+  if (action === 'edit-product') {
+    state.admin.productEdit = state.admin.products.find(product => product.id === button.dataset.productId) || null;
+    render(); return;
+  }
+  if (action === 'cancel-product-edit') { state.admin.productEdit = null; render(); return; }
+  if (action === 'archive-product') {
+    if (!confirm('¿Desactivar este producto del catálogo? Los pedidos anteriores conservarán su descripción e importe.')) return;
+    try { await api(`/api/admin/products/${button.dataset.productId}`, { method: 'DELETE' }); showToast('Producto desactivado.'); render(); }
+    catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'confirm-transfer') {
+    if (!confirm('Confirmá esta transferencia solo después de verificar la acreditación en la cuenta bancaria.')) return;
+    try { await api(`/api/admin/payments/${button.dataset.paymentId}/confirm`, { method: 'PUT', body: {} }); showToast('Transferencia confirmada.'); render(); }
+    catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'admin-logout') {
+    try { await api('/api/admin/logout', { method: 'POST', body: {} }); } catch { /* se limpia la sesión visual aunque expire */ }
+    state.admin.authenticated = false; state.admin.productEdit = null; showToast('Sesión cerrada.'); render(); return;
+  }
+  if (action === 'clear-admin-filter') { state.admin.filter = {}; render(); }
+}
+
+function bankMarkup(details, amountCents) {
+  if (!details) return '<div class="notice">Los datos bancarios no están configurados todavía.</div>';
+  const fields = [['Titular', details.accountHolder], ['Banco', details.bankName], ['CBU', details.cbu], ['Alias', details.alias], ['CUIT', details.cuit]].filter(([, value]) => value);
+  return `<div class="bank-details"><strong>Transferí ${money(amountCents)}</strong>${fields.map(([label, value]) => `<div class="bank-row"><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join('')}<p class="field-help">El pedido sigue pendiente hasta que DAYBREAKER verifique la acreditación. El comprobante por sí solo no confirma el pago.</p></div>`;
+}
+
+async function handleSubmit(form) {
+  const data = new FormData(form);
+  if (form.id === 'admin-login-form') {
+    const errorBox = document.querySelector('#admin-login-error');
+    errorBox.hidden = true;
+    try {
+      await api('/api/admin/login', { method: 'POST', body: { password: data.get('password') } });
+      state.admin.authenticated = true; showToast('Sesión iniciada.'); render();
+    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+    return;
+  }
+  if (form.id === 'quote-form') {
+    const errorBox = document.querySelector('#quote-error');
+    errorBox.hidden = true;
+    const rows = [...form.querySelectorAll('[data-quote-row]')].map(row => {
+      const productId = row.querySelector('[name="productId"]').value;
+      return {
+        productId: productId && productId !== 'custom' ? productId : '',
+        productName: row.querySelector('[name="productName"]').value.trim(),
+        quantity: Number(row.querySelector('[name="quantity"]').value),
+      };
+    });
+    try {
+      const result = await api('/api/quotes', { method: 'POST', body: {
+        companyName: data.get('companyName'), contactName: data.get('contactName'), cuit: data.get('cuit'),
+        phone: data.get('phone'), email: data.get('email'), destination: data.get('destination'),
+        items: rows, notes: data.get('notes'),
+      } });
+      document.querySelector('#quote-result').innerHTML = `<div class="form-success">Solicitud <strong>${escapeHtml(result.id)}</strong> registrada el ${dateTime(result.createdAt)}. DAYBREAKER te responderá por email o WhatsApp.</div>`;
+      form.reset(); state.quoteDraft = [{ productId: state.products.length ? '' : 'custom', productName: '', quantity: 1 }];
+    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+    return;
+  }
+  if (form.id === 'checkout-form') {
+    const errorBox = document.querySelector('#checkout-error');
+    errorBox.hidden = true;
+    const items = Object.entries(state.cart).filter(([, amount]) => Number(amount) > 0).map(([productId, amount]) => ({ productId, quantity: Number(amount) }));
+    try {
+      const order = await api('/api/orders', { method: 'POST', body: {
+        customerName: data.get('customerName'), email: data.get('email'), phone: data.get('phone'),
+        address: data.get('address'), province: data.get('province'), locality: data.get('locality'),
+        postalCode: data.get('postalCode'), notes: data.get('notes'), items,
+      } });
+      state.cart = {}; saveCart();
+      const [path, hash] = order.trackingUrl.split('#');
+      window.history.pushState({}, '', `${path}#${hash}`);
+      showToast(`Pedido ${order.id} registrado. El pago espera la cotización de flete.`);
+      render();
+    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+    return;
+  }
+  if (form.id === 'manual-track-form') {
+    const errorBox = document.querySelector('#track-error');
+    if (errorBox) errorBox.hidden = true;
+    const id = String(data.get('id') || '').trim();
+    const token = String(data.get('token') || '').trim();
+    try {
+      await api('/api/track', { method: 'POST', body: { id, token } });
+      routeToTracking(id, token);
+    } catch (error) {
+      if (errorBox) { errorBox.textContent = error.message; errorBox.hidden = false; }
+      else showToast(error.message);
+    }
+    return;
+  }
+  if (form.id === 'admin-product-form') {
+    const errorBox = document.querySelector('#admin-product-error');
+    errorBox.hidden = true;
+    const body = {
+      name: data.get('name'), slug: data.get('slug'), retailPrice: data.get('retailPrice'),
+      availability: data.get('availability'), shortDescription: data.get('shortDescription'), specifications: data.get('specifications'),
+    };
+    if (form.dataset.productId) body.active = form.querySelector('[name="active"]').checked;
+    try {
+      const path = form.dataset.productId ? `/api/admin/products/${form.dataset.productId}` : '/api/admin/products';
+      await api(path, { method: form.dataset.productId ? 'PUT' : 'POST', body });
+      state.admin.productEdit = null; state.products = await api('/api/catalog'); showToast('Producto guardado.'); render();
+    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+    return;
+  }
+  if (form.id === 'admin-filter-form') {
+    state.admin.filter = {
+      query: String(data.get('query') || '').trim(), status: String(data.get('status') || ''), date: String(data.get('date') || ''),
+    };
+    render(); return;
+  }
+  if (form.dataset.adminForm === 'freight') {
+    try {
+      await api(`/api/admin/orders/${form.dataset.orderId}/freight`, { method: 'PUT', body: {
+        freight: data.get('freight'), carrier: data.get('carrier'), shipmentTracking: data.get('shipmentTracking'),
+      } });
+      showToast('Flete guardado. El pedido aparece como pendiente de aceptación.'); render();
+    } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (form.dataset.adminForm === 'order-status') {
+    try {
+      await api(`/api/admin/orders/${form.dataset.orderId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      showToast('Estado del pedido actualizado.'); render();
+    } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (form.dataset.adminForm === 'quote-status') {
+    try {
+      await api(`/api/admin/quotes/${form.dataset.quoteId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      showToast('Estado de la solicitud actualizado.'); render();
+    } catch (error) { showToast(error.message); }
+  }
+}
+
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-action]');
+  if (button) { event.preventDefault(); handleAction(button); }
+});
+
+document.addEventListener('submit', event => {
+  const form = event.target;
+  if (form.matches('#quote-form, #checkout-form, #manual-track-form, #admin-login-form, #admin-product-form, #admin-filter-form, [data-admin-form]')) {
+    event.preventDefault(); handleSubmit(form);
+  }
+});
+
+document.addEventListener('change', event => {
+  const quantityInput = event.target.closest('[data-cart-qty]');
+  if (quantityInput) {
+    const amount = Number(quantityInput.value);
+    if (!Number.isInteger(amount) || amount < 1 || amount > 9999) return showToast('La cantidad debe ser un entero entre 1 y 9999.');
+    state.cart[quantityInput.dataset.cartQty] = amount; saveCart(); render();
+    return;
+  }
+  const select = event.target.closest('[data-quote-select]');
+  if (select) {
+    const input = select.closest('.field').querySelector('[name="productName"]');
+    const custom = select.value === 'custom';
+    input.hidden = !custom;
+    input.required = custom;
+    if (!custom) input.value = '';
+  }
+});
+
+window.addEventListener('hashchange', render);
+window.addEventListener('popstate', render);
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const [config, products] = await Promise.all([api('/api/config'), api('/api/catalog')]);
+    state.config = config;
+    state.products = products;
+  } catch (error) { showToast(error.message); }
+  render();
+});
+

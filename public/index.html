@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="es-AR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#172122">
+    <meta name="description" content="Catálogo minorista y presupuestos mayoristas de DAYBREAKER SAS para toda Argentina.">
+    <!--product-canonical-->
+    <title>DAYBREAKER SAS | Comercial</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Ir al contenido</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="/" aria-label="DAYBREAKER SAS, inicio">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span class="brand-copy"><strong>DAYBREAKER</strong><small>SAS · ARGENTINA</small></span>
+        </a>
+        <nav class="main-nav" aria-label="Navegación principal">
+          <a href="/" data-route="inicio">Inicio</a>
+          <a href="/quienes-somos" data-route="quienes-somos">Quiénes somos</a>
+          <a href="/catalogo" data-route="catalogo">Catálogo</a>
+          <a href="/presupuestos-mayoristas" data-route="presupuestos">Presupuestos mayoristas</a>
+          <a href="/carrito" data-route="carrito">Carrito y seguimiento</a>
+          <a href="/contacto" data-route="contacto">Contacto</a>
+        </nav>
+        <button class="button button-dark header-admin" type="button" data-action="admin">Panel interno <span aria-hidden="true">↗</span></button>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div id="app" aria-live="polite" aria-busy="true">
+        <section class="loading-shell"><span class="loader" aria-hidden="true"></span><p>Preparando el catálogo…</p></section>
+      </div>
+    </main>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <a class="brand brand-footer" href="/" aria-label="DAYBREAKER SAS, inicio">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+          <span class="brand-copy"><strong>DAYBREAKER</strong><small>SAS · ARGENTINA</small></span>
+        </a>
+        <p>Venta minorista y atención mayorista en toda Argentina.</p>
+        <span class="footer-note">© DAYBREAKER SAS</span>
+      </div>
+    </footer>
+  </body>
+</html>
