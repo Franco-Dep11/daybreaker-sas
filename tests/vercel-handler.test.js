@@ -14,10 +14,14 @@ process.env.ADMIN_PASSWORD = 'vercel-test-admin-password';
 process.env.NODE_ENV = 'production';
 
 const sqlDb = new DatabaseSync(':memory:');
+let assetsBinding = null;
 sqlDb.exec('PRAGMA foreign_keys = ON;');
 sqlDb.exec(readFileSync(resolve('migrations/0001_initial.sql'), 'utf8'));
-sqlDb.prepare('INSERT INTO products (id, slug, name, retail_price_cents, availability, image_url, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)').run('legacy-product', 'legacy-product', 'Legacy preservado', 125000, 'available', 'https://images.example.test/legacy.jpg', new Date().toISOString(), new Date().toISOString());
+sqlDb.prepare('INSERT INTO products (id, slug, name, retail_price_cents, availability, image_url, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)').run('legacy-product', 'legacy-product', 'Legacy preservado', 125000, 'available', 'https://images.example.test/legacy.jpg', new Date().toISOString(), new Date().toISOString());
+sqlDb.prepare(`INSERT INTO orders (id, tracking_token_hash, customer_name, email, phone, address, province, locality, postal_code, subtotal_cents, total_cents, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('legacy-order', 'a'.repeat(64), 'Cliente historico', 'legacy@example.test', '1111111111', 'Calle 1', 'Buenos Aires', 'La Plata', '1900', 125000, 125000, 'delivered', new Date().toISOString(), new Date().toISOString());
+sqlDb.prepare('INSERT INTO order_items (id, order_id, product_id, product_slug, product_name, unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('legacy-order-item', 'legacy-order', 'legacy-product', 'legacy-product', 'Legacy preservado', 125000, 1, 125000);
 sqlDb.exec(readFileSync(resolve('migrations/0002_admin_catalog.sql'), 'utf8'));
+sqlDb.exec(readFileSync(resolve('migrations/0003_product_image_positions.sql'), 'utf8'));
 const binding = {
   prepare(sql) {
     return {
@@ -52,7 +56,7 @@ const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : input);
   if (url.origin === 'https://d1-proxy.test') {
-    return worker.fetch(input instanceof Request ? input : new Request(input, init), { D1_API_SECRET: process.env.D1_PROXY_SECRET, DB: binding });
+    return worker.fetch(input instanceof Request ? input : new Request(input, init), { D1_API_SECRET: process.env.D1_PROXY_SECRET, DB: binding, ...(assetsBinding ? { ASSETS: assetsBinding } : {}) });
   }
   return originalFetch(input, init);
 };
@@ -148,7 +152,9 @@ test('rewrites Vercel conservan /api/config y /api/catalog usando el proxy D1', 
 
   const catalog = await rewrittenApi('/api/catalog');
   assert.equal(catalog.response.status, 200);
-  assert.deepEqual(catalog.data, []);
+  assert.deepEqual(catalog.data.map(product => product.id), ['legacy-product']);
+  assert.equal(catalog.data[0].availability, 'available');
+  assert.equal(catalog.data[0].stockQuantity, 0);
 });
 
 test('handler lee __path desde req.query si Vercel no lo incluye en req.url', async () => {
@@ -178,7 +184,7 @@ test('Vercel permite login y CRUD administrativo cuando D1 está verificada', as
     name: 'Producto en preview', slug: 'producto-preview', retailPrice: '4500', availability: 'available',
   } });
   assert.equal(created.response.status, 201);
-  assert.equal((await rewrittenApi('/api/catalog')).data[0].id, created.data.id);
+  assert.ok((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id));
   const imageNotConfigured = await rewrittenApi(`/api/admin/products/${created.data.id}/images`, { method: 'POST', auth: true, contentType: 'image/png', rawBody: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) });
   assert.equal(imageNotConfigured.response.status, 503);
   assert.match(imageNotConfigured.data.error, /R2/);
@@ -191,7 +197,7 @@ test('Vercel permite login y CRUD administrativo cuando D1 está verificada', as
 
   const archived = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'DELETE', auth: true });
   assert.equal(archived.response.status, 200);
-  assert.deepEqual((await rewrittenApi('/api/catalog')).data, []);
+  assert.deepEqual((await rewrittenApi('/api/catalog')).data.map(product => product.id), ['legacy-product']);
 });
 
 test('0002 conserva productos existentes y D1 administra categorias, stock y visibilidad', async () => {
@@ -199,6 +205,16 @@ test('0002 conserva productos existentes y D1 administra categorias, stock y vis
     { id: 'legacy-product', slug: 'legacy-product', retail_price_cents: 125000, visible_in_store: 1 });
   assert.equal((await rewrittenApi('/api/admin/categories')).response.status, 401);
   assert.equal(sqlDb.prepare('SELECT id FROM product_images WHERE id = ?').get('legacy-image-legacy-product').id, 'legacy-image-legacy-product');
+  const legacyProduct = sqlDb.prepare('SELECT availability, stock_quantity, category_id, visible_in_store FROM products WHERE id = ?').get('legacy-product');
+  assert.deepEqual({ ...legacyProduct }, { availability: 'available', stock_quantity: 0, category_id: null, visible_in_store: 1 });
+  assert.equal(sqlDb.prepare('SELECT COUNT(*) AS count FROM orders WHERE id = ?').get('legacy-order').count, 1);
+  assert.equal(sqlDb.prepare('SELECT product_name, unit_price_cents FROM order_items WHERE id = ?').get('legacy-order-item').product_name, 'Legacy preservado');
+  const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { password: process.env.ADMIN_PASSWORD } });
+  assert.equal(login.response.status, 200);
+  const legacyAdminProduct = (await rewrittenApi('/api/admin/products', { auth: true })).data.find(item => item.id === 'legacy-product');
+  assert.equal(legacyAdminProduct.availability, 'available');
+  assert.equal(legacyAdminProduct.stockQuantity, 0);
+  assert.equal(legacyAdminProduct.categoryId, '');
   const category = await rewrittenApi('/api/admin/categories', { method: 'POST', auth: true, body: { name: 'Sillas operativas' } });
   assert.equal(category.response.status, 201);
   const subcategory = await rewrittenApi(`/api/admin/categories/${category.data.id}/subcategories`, { method: 'POST', auth: true, body: { name: 'Linea ejecutiva' } });
@@ -232,6 +248,40 @@ test('0002 conserva productos existentes y D1 administra categorias, stock y vis
   } });
   assert.equal(shown.data.visibleInStore, true);
   assert.ok((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id));
+
+  const otherCategory = await rewrittenApi('/api/admin/categories', { method: 'POST', auth: true, body: { name: 'Otra categoria' } });
+  const mismatchedSubcategory = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'PUT', auth: true, body: {
+    ...shown.data, retailPrice: '500000', categoryId: otherCategory.data.id, subcategoryId: subcategory.data.id,
+  } });
+  assert.equal(mismatchedSubcategory.response.status, 400);
+
+  const objects = new Map();
+  assetsBinding = {
+    async put(key, bytes, options) { objects.set(key, { bytes, contentType: options.httpMetadata.contentType }); },
+    async get(key) { const object = objects.get(key); return object && { body: object.bytes, httpMetadata: { contentType: object.contentType } }; },
+  };
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const imagePath = `/api/admin/products/${created.data.id}/images`;
+  const positions = [];
+  for (let index = 0; index < 6; index++) {
+    const image = await rewrittenApi(imagePath, { method: 'POST', auth: true, contentType: 'image/png', rawBody: png });
+    assert.equal(image.response.status, 201);
+    positions.push(image.data.position);
+  }
+  assert.deepEqual(positions, [0, 1, 2, 3, 4, 5]);
+  const seventh = await rewrittenApi(imagePath, { method: 'POST', auth: true, contentType: 'image/png', rawBody: png });
+  assert.equal(seventh.response.status, 400);
+  const removedImage = await rewrittenApi(`${imagePath}/${(await rewrittenApi(imagePath, { auth: true })).data[2].id}`, { method: 'DELETE', auth: true, body: {} });
+  assert.equal(removedImage.response.status, 200);
+  const replacementImage = await rewrittenApi(imagePath, { method: 'POST', auth: true, contentType: 'image/png', rawBody: png });
+  assert.equal(replacementImage.response.status, 201);
+  assert.equal(replacementImage.data.position, 2);
+  assert.deepEqual((await rewrittenApi(imagePath, { auth: true })).data.map(image => image.position), [0, 1, 2, 3, 4, 5]);
+  assert.throws(() => sqlDb.prepare(`INSERT INTO product_images (id, product_id, url, position, is_primary, active, created_at) VALUES (?, ?, ?, 6, 0, 1, ?)`)
+    .run('out-of-range-image', created.data.id, 'https://images.example.test/x.png', new Date().toISOString()), /CHECK constraint failed/);
+  assert.throws(() => sqlDb.prepare(`INSERT INTO product_images (id, product_id, url, position, is_primary, active, created_at) VALUES (?, ?, ?, 5, 0, 1, ?)`)
+    .run('duplicate-position-image', created.data.id, 'https://images.example.test/y.png', new Date().toISOString()), /UNIQUE constraint failed/);
   assert.equal((await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'DELETE', auth: true })).response.status, 200);
   assert.equal(sqlDb.prepare('SELECT COUNT(*) AS count FROM products WHERE id = ?').get(created.data.id).count, 1);
+  assert.equal(sqlDb.prepare('SELECT COUNT(*) AS count FROM order_items WHERE id = ?').get('legacy-order-item').count, 1);
 });

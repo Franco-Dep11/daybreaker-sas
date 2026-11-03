@@ -12,3 +12,7 @@ binding = "DB"
 database_name = "daybreaker-sas-dev"
 database_id = "46d42e7b-20b6-417f-b58f-5621af849b00"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "daybreaker-product-images"

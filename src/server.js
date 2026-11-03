@@ -613,19 +613,29 @@ async function api(req, res, url) {
   if (imageCollectionRoute && method === 'POST') {
     const product = await db.prepare('SELECT id, name FROM products WHERE id = ? AND active = 1').get(imageCollectionRoute[1]);
     if (!product) throw badRequest('No encontramos ese producto activo.', 404, 'NOT_FOUND');
-    const existing = await db.prepare('SELECT COUNT(*) AS count FROM product_images WHERE product_id = ? AND active = 1').get(product.id);
-    if (existing.count >= 6) throw badRequest('Cada producto puede tener hasta seis imágenes.');
+    const existing = await db.prepare('SELECT position FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position').all(product.id);
+    if (existing.length >= 6) throw badRequest('Cada producto puede tener hasta seis imagenes.');
+    const usedPositions = new Set(existing.map(image => image.position));
+    const position = [0, 1, 2, 3, 4, 5].find(candidate => !usedPositions.has(candidate));
+    if (position === undefined) throw badRequest('El producto ya tiene seis imagenes activas.');
     const contentType = String(req.headers['content-type'] || '').toLowerCase();
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw badRequest('Usá imágenes JPEG, PNG o WebP.', 415, 'UNSUPPORTED_MEDIA_TYPE');
     const bytes = await readImageBytes(req);
     const stored = await uploadProductAsset(product.id, bytes, contentType);
-    const id = randomUUID(); const timestamp = now(); const primary = existing.count === 0;
-    await transaction(async () => {
-      await db.prepare(`INSERT INTO product_images (id, product_id, url, object_key, alt_text, position, is_primary, active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(id, product.id, stored.url, stored.key, product.name, existing.count, primary ? 1 : 0, timestamp);
-      if (primary) await db.prepare('UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?').run(stored.url, timestamp, product.id);
-    });
-    return json(res, 201, { id, url: stored.url, altText: product.name, position: existing.count, isPrimary: primary });
+    const id = randomUUID(); const timestamp = now(); const primary = existing.length === 0;
+    try {
+      await transaction(async () => {
+        await db.prepare(`INSERT INTO product_images (id, product_id, url, object_key, alt_text, position, is_primary, active, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(id, product.id, stored.url, stored.key, product.name, position, primary ? 1 : 0, timestamp);
+        if (primary) await db.prepare('UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?').run(stored.url, timestamp, product.id);
+      });
+    } catch (error) {
+      if (/product_images\.product_id, product_images\.position/i.test(error.message)) {
+        throw badRequest('Otra imagen se guardo al mismo tiempo. Volve a intentar.', 409, 'IMAGE_POSITION_CONFLICT');
+      }
+      throw error;
+    }
+    return json(res, 201, { id, url: stored.url, altText: product.name, position, isPrimary: primary });
   }
   const imageRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)\/images\/([a-f0-9-]+)$/i);
   if (imageRoute && method === 'PUT') {
