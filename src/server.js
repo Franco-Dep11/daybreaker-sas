@@ -80,7 +80,7 @@ function configPublic() {
     transferEnabled,
     mercadopagoEnabled,
     adminEnabled: Boolean(process.env.ADMIN_PASSWORD),
-    readOnlyPreview: Boolean(process.env.VERCEL),
+    readOnlyPreview: Boolean(process.env.VERCEL && process.env.D1_PROXY_VERIFIED !== 'true'),
   };
 }
 
@@ -316,12 +316,6 @@ async function api(req, res, url) {
   const method = req.method || 'GET';
   const pathname = url.pathname;
   const isWebhook = pathname === '/api/webhooks/mercadopago' && method === 'POST';
-  if (process.env.VERCEL && method !== 'GET') {
-    return json(res, 503, {
-      error: 'La vista de Vercel es de solo lectura. Conectá una base de datos persistente para habilitar operaciones.',
-      code: 'PERSISTENT_DATABASE_REQUIRED',
-    });
-  }
   if (method !== 'GET' && !isWebhook) requireSameOrigin(req, url);
 
   if (method === 'GET' && pathname === '/api/config') return json(res, 200, configPublic());
