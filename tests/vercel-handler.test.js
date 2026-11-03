@@ -16,6 +16,8 @@ process.env.NODE_ENV = 'production';
 const sqlDb = new DatabaseSync(':memory:');
 sqlDb.exec('PRAGMA foreign_keys = ON;');
 sqlDb.exec(readFileSync(resolve('migrations/0001_initial.sql'), 'utf8'));
+sqlDb.prepare('INSERT INTO products (id, slug, name, retail_price_cents, availability, image_url, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)').run('legacy-product', 'legacy-product', 'Legacy preservado', 125000, 'available', 'https://images.example.test/legacy.jpg', new Date().toISOString(), new Date().toISOString());
+sqlDb.exec(readFileSync(resolve('migrations/0002_admin_catalog.sql'), 'utf8'));
 const binding = {
   prepare(sql) {
     return {
@@ -95,13 +97,14 @@ function resolveVercelRewrite(input, rewriteRules = JSON.parse(readFileSync(reso
   throw new Error('Rewrite recursion exceeded the test limit.');
 }
 
-async function invokeVercelTarget(target, { method = 'GET', body, auth = false } = {}) {
+async function invokeVercelTarget(target, { method = 'GET', body, auth = false, contentType, rawBody } = {}) {
   const headers = { host: `127.0.0.1:${server.address().port}`, 'x-forwarded-proto': 'http' };
   if (method !== 'GET') headers.origin = base;
-  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (contentType) headers['content-type'] = contentType;
+  else if (body !== undefined) headers['content-type'] = 'application/json';
   if (auth && cookie) headers.cookie = cookie;
   const response = await originalFetch(`${base}${target}`, {
-    method, headers, body: body === undefined ? undefined : JSON.stringify(body),
+    method, headers, body: rawBody ?? (body === undefined ? undefined : JSON.stringify(body)),
   });
   if (response.headers.has('set-cookie')) cookie = response.headers.get('set-cookie').split(';')[0];
   return { response, data: await response.json().catch(() => null) };
@@ -176,6 +179,9 @@ test('Vercel permite login y CRUD administrativo cuando D1 está verificada', as
   } });
   assert.equal(created.response.status, 201);
   assert.equal((await rewrittenApi('/api/catalog')).data[0].id, created.data.id);
+  const imageNotConfigured = await rewrittenApi(`/api/admin/products/${created.data.id}/images`, { method: 'POST', auth: true, contentType: 'image/png', rawBody: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) });
+  assert.equal(imageNotConfigured.response.status, 503);
+  assert.match(imageNotConfigured.data.error, /R2/);
 
   const edited = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'PUT', auth: true, body: {
     name: 'Producto editado', slug: 'producto-preview', retailPrice: '5000', availability: 'available',
@@ -186,4 +192,46 @@ test('Vercel permite login y CRUD administrativo cuando D1 está verificada', as
   const archived = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'DELETE', auth: true });
   assert.equal(archived.response.status, 200);
   assert.deepEqual((await rewrittenApi('/api/catalog')).data, []);
+});
+
+test('0002 conserva productos existentes y D1 administra categorias, stock y visibilidad', async () => {
+  assert.deepEqual({ ...sqlDb.prepare('SELECT id, slug, retail_price_cents, visible_in_store FROM products WHERE id = ?').get('legacy-product') },
+    { id: 'legacy-product', slug: 'legacy-product', retail_price_cents: 125000, visible_in_store: 1 });
+  assert.equal((await rewrittenApi('/api/admin/categories')).response.status, 401);
+  assert.equal(sqlDb.prepare('SELECT id FROM product_images WHERE id = ?').get('legacy-image-legacy-product').id, 'legacy-image-legacy-product');
+  const category = await rewrittenApi('/api/admin/categories', { method: 'POST', auth: true, body: { name: 'Sillas operativas' } });
+  assert.equal(category.response.status, 201);
+  const subcategory = await rewrittenApi(`/api/admin/categories/${category.data.id}/subcategories`, { method: 'POST', auth: true, body: { name: 'Linea ejecutiva' } });
+  assert.equal(subcategory.response.status, 201);
+  const created = await rewrittenApi('/api/admin/products', { method: 'POST', auth: true, body: {
+    name: 'Silla Nova', retailPrice: '485000', availability: 'available', categoryId: category.data.id,
+    subcategoryId: subcategory.data.id, stockQuantity: 7, specifications: 'Material: acero', attributes: [{ name: 'Capacidad', value: '120 kg' }],
+  } });
+  assert.equal(created.response.status, 201);
+  assert.equal(created.data.stockQuantity, 7);
+  assert.equal(created.data.categoryId, category.data.id);
+  assert.deepEqual(created.data.attributes, [{ name: 'Capacidad', value: '120 kg' }]);
+  const oldSlug = created.data.slug;
+  const hidden = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'PUT', auth: true, body: {
+    ...created.data, retailPrice: '500000', name: 'Silla Nova actualizada', visibleInStore: false,
+  } });
+  assert.equal(hidden.data.slug, oldSlug);
+  assert.equal(hidden.data.visibleInStore, false);
+  assert.equal(hidden.data.retailPriceCents, 50000000);
+  assert.equal((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id), false);
+  const hiddenOrder = await rewrittenApi('/api/orders', { method: 'POST', body: {
+    customerName: 'Comprador', email: 'buyer@example.test', phone: '1122334455', address: 'Calle 10', province: 'Buenos Aires', locality: 'La Plata', postalCode: '1900', items: [{ productId: created.data.id, quantity: 1 }],
+  } });
+  assert.equal(hiddenOrder.response.status, 400);
+  const hiddenQuote = await rewrittenApi('/api/quotes', { method: 'POST', body: {
+    companyName: 'Comprador mayorista', email: 'buyer@example.test', phone: '1122334455', destination: 'La Plata', items: [{ productId: created.data.id, quantity: 1 }],
+  } });
+  assert.equal(hiddenQuote.response.status, 400);
+  const shown = await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'PUT', auth: true, body: {
+    ...hidden.data, retailPrice: '500000', visibleInStore: true,
+  } });
+  assert.equal(shown.data.visibleInStore, true);
+  assert.ok((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id));
+  assert.equal((await rewrittenApi(`/api/admin/products/${created.data.id}`, { method: 'DELETE', auth: true })).response.status, 200);
+  assert.equal(sqlDb.prepare('SELECT COUNT(*) AS count FROM products WHERE id = ?').get(created.data.id).count, 1);
 });

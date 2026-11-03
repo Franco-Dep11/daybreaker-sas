@@ -3,7 +3,7 @@ import { createReadStream, existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { db, logOrderEvent, now, transaction } from './db.js';
+import { db, logOrderEvent, now, transaction, uploadProductAsset } from './db.js';
 import {
   AVAILABILITY, ORDER_STATUSES, QUOTE_STATUSES, asAmount, badRequest, email,
   makeSlug, parseMoneyCents, quantity, text,
@@ -132,6 +132,19 @@ function readBody(req) {
   });
 }
 
+function readImageBytes(req) {
+  return new Promise((resolveBytes, reject) => {
+    const chunks = []; let size = 0;
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > 4 * 1024 * 1024) { reject(badRequest('Cada imagen debe pesar hasta 4 MB.', 413, 'IMAGE_TOO_LARGE')); req.destroy(); return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolveBytes(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
 function requireSameOrigin(req, url) {
   const origin = req.headers.origin;
   if (!origin) return;
@@ -180,9 +193,24 @@ function productRecord(row) {
     imageUrl: row.image_url,
     technicalPdfUrl: row.technical_pdf_url,
     active: Boolean(row.active),
+    visibleInStore: Boolean(row.visible_in_store ?? row.active),
+    stockQuantity: row.stock_quantity ?? 0,
+    categoryId: row.category_id || '',
+    subcategoryId: row.subcategory_id || '',
+    attributes: JSON.parse(row.attributes_json || '[]'),
+    images: JSON.parse(row.images_json || '[]'),
+    categoryName: row.category_name || '',
+    subcategoryName: row.subcategory_name || '',
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+async function withProductImages(rows) {
+  return Promise.all(rows.map(async row => {
+    const images = await db.prepare('SELECT id, url, alt_text, position, is_primary FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position').all(row.id);
+    return productRecord({ ...row, images_json: JSON.stringify(images.map(image => ({ id: image.id, url: image.url, altText: image.alt_text, position: image.position, isPrimary: Boolean(image.is_primary) }))) });
+  }));
 }
 
 async function orderItems(orderId) {
@@ -261,12 +289,22 @@ function addProduct(body, id = randomUUID()) {
   if (!AVAILABILITY.includes(availability)) throw badRequest('Seleccioná una disponibilidad válida.');
   const imageUrl = text(body.imageUrl || '', 'Imagen', { required: false, max: 1000 });
   const pdfUrl = text(body.technicalPdfUrl || '', 'Ficha PDF', { required: false, max: 1000 });
+  const stockQuantity = Number(body.stockQuantity ?? 0);
+  if (!Number.isSafeInteger(stockQuantity) || stockQuantity < 0) throw badRequest('El stock debe ser un entero igual o mayor a cero.');
+  const categoryId = body.categoryId ? text(body.categoryId, 'Categoría', { max: 80 }) : null;
+  const subcategoryId = body.subcategoryId ? text(body.subcategoryId, 'Subcategoría', { max: 80 }) : null;
+  const attributes = body.attributes ?? [];
+  if (!Array.isArray(attributes) || attributes.length > 40) throw badRequest('Las especificaciones deben ser una lista de hasta 40 atributos.');
+  const cleanAttributes = attributes.map(attribute => ({
+    name: text(attribute.name, 'Atributo', { max: 80 }), value: text(attribute.value, 'Valor', { max: 240 }),
+  })).filter(attribute => attribute.name && attribute.value);
   for (const assetUrl of [imageUrl, pdfUrl]) {
     if (assetUrl && !(/^https:\/\//i.test(assetUrl) || (assetUrl.startsWith('/') && !assetUrl.startsWith('//') && !assetUrl.includes('\\')))) {
       throw badRequest('Las imágenes y fichas deben usar HTTPS o una ruta local del sitio.');
     }
   }
-  return { id, slug: productSlug, name, description, specifications, price, availability, imageUrl, pdfUrl };
+  return { id, slug: productSlug, name, description, specifications, price, availability, imageUrl, pdfUrl,
+    stockQuantity, categoryId, subcategoryId, attributes: cleanAttributes, visibleInStore: body.visibleInStore !== false };
 }
 
 async function getOrderOr404(id) {
@@ -291,7 +329,7 @@ async function parseQuoteItems(items) {
     let productId = null;
     let productSlug = '';
     if (item.productId) {
-      const product = await db.prepare('SELECT id, slug, name FROM products WHERE id = ? AND active = 1').get(text(item.productId, 'Producto', { max: 80 }));
+      const product = await db.prepare('SELECT id, slug, name FROM products WHERE id = ? AND active = 1 AND visible_in_store = 1').get(text(item.productId, 'Producto', { max: 80 }));
       if (!product) throw badRequest('Uno de los productos elegidos ya no está disponible. Actualizá la página.');
       productName = product.name;
       productId = product.id;
@@ -320,14 +358,14 @@ async function api(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/config') return json(res, 200, configPublic());
   if (method === 'GET' && pathname === '/api/catalog') {
-    const rows = (await db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY name COLLATE NOCASE').all());
-    return json(res, 200, rows.map(productRecord));
+    const rows = (await db.prepare('SELECT * FROM products WHERE active = 1 AND visible_in_store = 1 ORDER BY name COLLATE NOCASE').all());
+    return json(res, 200, await withProductImages(rows));
   }
   if (method === 'GET' && pathname.startsWith('/api/products/')) {
     const slugValue = decodeURIComponent(pathname.slice('/api/products/'.length));
-    const product = (await db.prepare('SELECT * FROM products WHERE slug = ? AND active = 1').get(slugValue));
+    const product = (await db.prepare('SELECT * FROM products WHERE slug = ? AND active = 1 AND visible_in_store = 1').get(slugValue));
     if (!product) return json(res, 404, { error: 'No encontramos ese producto.', code: 'NOT_FOUND' });
-    return json(res, 200, productRecord(product));
+    return json(res, 200, (await withProductImages([product]))[0]);
   }
 
   if (method === 'POST' && pathname === '/api/orders') {
@@ -352,7 +390,7 @@ async function api(req, res, url) {
     const items = [];
     for (const [productId, amount] of itemMap) {
       const product = (await db.prepare(`SELECT id, slug, name, retail_price_cents, availability
-        FROM products WHERE id = ? AND active = 1`).get(productId));
+        FROM products WHERE id = ? AND active = 1 AND visible_in_store = 1`).get(productId));
       if (!product || product.availability !== 'available') throw badRequest('Un producto del carrito ya no se puede comprar. Actualizá el catálogo.');
       if (amount > 9999) throw badRequest('La cantidad de un producto supera el máximo permitido.');
       items.push({ ...product, quantity: amount, lineTotalCents: product.retail_price_cents * amount });
@@ -516,35 +554,122 @@ async function api(req, res, url) {
 
   if (pathname.startsWith('/api/admin/')) await requireAdmin(req);
 
+  if (method === 'GET' && pathname === '/api/admin/categories') {
+    const categories = await db.prepare('SELECT id, name, slug FROM categories ORDER BY name COLLATE NOCASE').all();
+    const subcategories = await db.prepare('SELECT id, category_id, name, slug FROM subcategories ORDER BY name COLLATE NOCASE').all();
+    return json(res, 200, categories.map(category => ({ ...category, subcategories: subcategories.filter(item => item.category_id === category.id).map(item => ({ id: item.id, name: item.name, slug: item.slug })) })));
+  }
+  if (method === 'POST' && pathname === '/api/admin/categories') {
+    const body = await readBody(req);
+    const name = text(body.name, 'Nombre de categoría', { max: 100 });
+    if (await db.prepare('SELECT id FROM categories WHERE name = ?').get(name)) throw badRequest('Ya existe una categoria con ese nombre.', 409, 'CATEGORY_EXISTS');
+    const base = makeSlug(name);
+    let slug = base; let suffix = 2;
+    while (await db.prepare('SELECT id FROM categories WHERE slug = ?').get(slug)) slug = `${base}-${suffix++}`;
+    const id = randomUUID(); const timestamp = now();
+    await db.prepare('INSERT INTO categories (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)').run(id, name, slug, timestamp, timestamp);
+    return json(res, 201, { id, name, slug, subcategories: [] });
+  }
+  const subcategoryRoute = pathname.match(/^\/api\/admin\/categories\/([a-f0-9-]+)\/subcategories$/i);
+  if (subcategoryRoute && method === 'POST') {
+    const body = await readBody(req);
+    const category = await db.prepare('SELECT id FROM categories WHERE id = ?').get(subcategoryRoute[1]);
+    if (!category) throw badRequest('No encontramos esa categoría.', 404, 'NOT_FOUND');
+    const name = text(body.name, 'Nombre de subcategoría', { max: 100 });
+    if (await db.prepare('SELECT id FROM subcategories WHERE category_id = ? AND name = ?').get(category.id, name)) throw badRequest('Ya existe una subcategoria con ese nombre.', 409, 'SUBCATEGORY_EXISTS');
+    const base = makeSlug(name); let slug = base; let suffix = 2;
+    while (await db.prepare('SELECT id FROM subcategories WHERE category_id = ? AND slug = ?').get(category.id, slug)) slug = `${base}-${suffix++}`;
+    const id = randomUUID(); const timestamp = now();
+    await db.prepare('INSERT INTO subcategories (id, category_id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, category.id, name, slug, timestamp, timestamp);
+    return json(res, 201, { id, categoryId: category.id, name, slug });
+  }
+
   if (method === 'GET' && pathname === '/api/admin/products') {
-    return json(res, 200, (await db.prepare('SELECT * FROM products ORDER BY active DESC, name COLLATE NOCASE').all()).map(productRecord));
+    return json(res, 200, await withProductImages(await db.prepare(`SELECT p.*, c.name AS category_name, s.name AS subcategory_name FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN subcategories s ON s.id = p.subcategory_id
+      ORDER BY p.active DESC, p.name COLLATE NOCASE`).all()));
   }
   if (method === 'POST' && pathname === '/api/admin/products') {
     const body = await readBody(req);
     const product = addProduct(body);
+    if (product.categoryId && !await db.prepare('SELECT id FROM categories WHERE id = ?').get(product.categoryId)) throw badRequest('Seleccioná una categoría válida.');
+    if (product.subcategoryId && !await db.prepare('SELECT id FROM subcategories WHERE id = ? AND category_id = ?').get(product.subcategoryId, product.categoryId)) throw badRequest('La subcategoría no corresponde a la categoría elegida.');
+    const base = product.slug; let slug = base; let suffix = 2;
+    while (await db.prepare('SELECT id FROM products WHERE slug = ?').get(slug)) slug = `${base}-${suffix++}`;
     const timestamp = now();
-    (await db.prepare(`INSERT INTO products (id, slug, name, short_description, specifications, retail_price_cents,
-      availability, image_url, technical_pdf_url, active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
-      .run(product.id, product.slug, product.name, product.description, product.specifications, product.price,
-        product.availability, product.imageUrl || null, product.pdfUrl || null, timestamp, timestamp));
+    await db.prepare(`INSERT INTO products (id, slug, name, short_description, specifications, retail_price_cents,
+      availability, image_url, technical_pdf_url, active, visible_in_store, stock_quantity, category_id, subcategory_id, attributes_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(product.id, slug, product.name, product.description, product.specifications, product.price,
+        product.availability, product.imageUrl || null, product.pdfUrl || null, product.visibleInStore ? 1 : 0,
+        product.stockQuantity, product.categoryId, product.subcategoryId, JSON.stringify(product.attributes), timestamp, timestamp);
     return json(res, 201, productRecord((await db.prepare('SELECT * FROM products WHERE id = ?').get(product.id))));
+  }
+  const imageCollectionRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)\/images$/i);
+  if (imageCollectionRoute && method === 'GET') {
+    const images = await db.prepare('SELECT id, url, alt_text, position, is_primary FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position').all(imageCollectionRoute[1]);
+    return json(res, 200, images.map(image => ({ ...image, altText: image.alt_text, isPrimary: Boolean(image.is_primary) })));
+  }
+  if (imageCollectionRoute && method === 'POST') {
+    const product = await db.prepare('SELECT id, name FROM products WHERE id = ? AND active = 1').get(imageCollectionRoute[1]);
+    if (!product) throw badRequest('No encontramos ese producto activo.', 404, 'NOT_FOUND');
+    const existing = await db.prepare('SELECT COUNT(*) AS count FROM product_images WHERE product_id = ? AND active = 1').get(product.id);
+    if (existing.count >= 6) throw badRequest('Cada producto puede tener hasta seis imágenes.');
+    const contentType = String(req.headers['content-type'] || '').toLowerCase();
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)) throw badRequest('Usá imágenes JPEG, PNG o WebP.', 415, 'UNSUPPORTED_MEDIA_TYPE');
+    const bytes = await readImageBytes(req);
+    const stored = await uploadProductAsset(product.id, bytes, contentType);
+    const id = randomUUID(); const timestamp = now(); const primary = existing.count === 0;
+    await transaction(async () => {
+      await db.prepare(`INSERT INTO product_images (id, product_id, url, object_key, alt_text, position, is_primary, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`).run(id, product.id, stored.url, stored.key, product.name, existing.count, primary ? 1 : 0, timestamp);
+      if (primary) await db.prepare('UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?').run(stored.url, timestamp, product.id);
+    });
+    return json(res, 201, { id, url: stored.url, altText: product.name, position: existing.count, isPrimary: primary });
+  }
+  const imageRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)\/images\/([a-f0-9-]+)$/i);
+  if (imageRoute && method === 'PUT') {
+    const image = await db.prepare('SELECT id, url FROM product_images WHERE id = ? AND product_id = ? AND active = 1').get(imageRoute[2], imageRoute[1]);
+    if (!image) throw badRequest('No encontramos esa imagen.', 404, 'NOT_FOUND');
+    await transaction(async () => {
+      await db.prepare('UPDATE product_images SET is_primary = 0 WHERE product_id = ? AND is_primary = 1').run(imageRoute[1]);
+      await db.prepare('UPDATE product_images SET is_primary = 1 WHERE id = ? AND product_id = ? AND active = 1').run(imageRoute[2], imageRoute[1]);
+      await db.prepare('UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?').run(image.url, now(), imageRoute[1]);
+    });
+    return json(res, 200, { primary: true });
+  }
+  if (imageRoute && method === 'DELETE') {
+    const image = await db.prepare('SELECT id, is_primary FROM product_images WHERE id = ? AND product_id = ? AND active = 1').get(imageRoute[2], imageRoute[1]);
+    if (!image) throw badRequest('No encontramos esa imagen.', 404, 'NOT_FOUND');
+    const timestamp = now();
+    await transaction(async () => {
+      await db.prepare('UPDATE product_images SET active = 0, is_primary = 0 WHERE id = ? AND product_id = ?').run(imageRoute[2], imageRoute[1]);
+      if (image.is_primary) {
+        await db.prepare('UPDATE product_images SET is_primary = 1 WHERE id = (SELECT id FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position LIMIT 1)').run(imageRoute[1]);
+        await db.prepare('UPDATE products SET image_url = (SELECT url FROM product_images WHERE product_id = ? AND active = 1 AND is_primary = 1 LIMIT 1), updated_at = ? WHERE id = ?').run(imageRoute[1], timestamp, imageRoute[1]);
+      }
+    });
+    return json(res, 200, { removed: true });
   }
   const productRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)$/i);
   if (productRoute && method === 'PUT') {
     const body = await readBody(req);
-    const current = (await db.prepare('SELECT image_url, technical_pdf_url FROM products WHERE id = ?').get(productRoute[1]));
+    const current = (await db.prepare('SELECT * FROM products WHERE id = ?').get(productRoute[1]));
     if (!current) throw badRequest('No encontramos ese producto.', 404, 'NOT_FOUND');
     const product = addProduct({
-      ...body,
+      ...body, slug: current.slug,
       imageUrl: body.imageUrl ?? current.image_url ?? '',
       technicalPdfUrl: body.technicalPdfUrl ?? current.technical_pdf_url ?? '',
     }, productRoute[1]);
+    if (product.categoryId && !await db.prepare('SELECT id FROM categories WHERE id = ?').get(product.categoryId)) throw badRequest('Seleccioná una categoría válida.');
+    if (product.subcategoryId && !await db.prepare('SELECT id FROM subcategories WHERE id = ? AND category_id = ?').get(product.subcategoryId, product.categoryId)) throw badRequest('La subcategoría no corresponde a la categoría elegida.');
     const timestamp = now();
-    const result = (await db.prepare(`UPDATE products SET slug = ?, name = ?, short_description = ?, specifications = ?,
-      retail_price_cents = ?, availability = ?, image_url = ?, technical_pdf_url = ?, active = ?, updated_at = ? WHERE id = ?`)
-      .run(product.slug, product.name, product.description, product.specifications, product.price, product.availability,
-        product.imageUrl || null, product.pdfUrl || null, body.active === false ? 0 : 1, timestamp, product.id));
+    const result = (await db.prepare(`UPDATE products SET name = ?, short_description = ?, specifications = ?,
+      retail_price_cents = ?, availability = ?, image_url = ?, technical_pdf_url = ?, active = ?, visible_in_store = ?, stock_quantity = ?,
+      category_id = ?, subcategory_id = ?, attributes_json = ?, updated_at = ? WHERE id = ?`)
+      .run(product.name, product.description, product.specifications, product.price, product.availability,
+        product.imageUrl || null, product.pdfUrl || null, body.active === false ? 0 : 1, product.visibleInStore ? 1 : 0,
+        product.stockQuantity, product.categoryId, product.subcategoryId, JSON.stringify(product.attributes), timestamp, product.id));
     if (!result.changes) throw badRequest('No encontramos ese producto.', 404, 'NOT_FOUND');
     return json(res, 200, productRecord((await db.prepare('SELECT * FROM products WHERE id = ?').get(product.id))));
   }
@@ -758,7 +883,7 @@ async function serveIndex(req, res, pathname) {
   }
   const match = pathname.match(/^\/productos\/([a-z0-9-]+)$/i);
   if (match) {
-    const product = (await db.prepare('SELECT name, short_description, slug FROM products WHERE slug = ? AND active = 1').get(match[1]));
+    const product = (await db.prepare('SELECT name, short_description, slug FROM products WHERE slug = ? AND active = 1 AND visible_in_store = 1').get(match[1]));
     if (!product) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html.replace('<title>DAYBREAKER SAS | Comercial</title>', '<title>Producto no encontrado | DAYBREAKER SAS</title>'));
@@ -808,7 +933,7 @@ export async function handleRequest(req, res) {
     }
     if (url.pathname === '/sitemap.xml') {
       const base = escapeHtml(publicBaseUrl(req));
-      const products = (await db.prepare('SELECT slug, updated_at FROM products WHERE active = 1 ORDER BY slug').all());
+      const products = (await db.prepare('SELECT slug, updated_at FROM products WHERE active = 1 AND visible_in_store = 1 ORDER BY slug').all());
       const pages = ['/', '/quienes-somos', '/catalogo', '/presupuestos-mayoristas', '/carrito', '/contacto'];
       const urls = [...pages.map(path => `<url><loc>${base}${path === '/' ? '/' : path}</loc></url>`), ...products.map(product =>
         `<url><loc>${base}/productos/${encodeURIComponent(product.slug)}</loc><lastmod>${product.updated_at.slice(0, 10)}</lastmod></url>`),
@@ -823,9 +948,9 @@ export async function handleRequest(req, res) {
   } catch (error) {
     if (res.headersSent) return res.destroy();
     const status = Number(error.status) || 500;
-    if (status >= 500) console.error('Error de servidor:', error.message);
+    if (status >= 500) console.error('Error de servidor:', status, url.pathname);
     return json(res, status, {
-      error: status >= 500 ? 'Ocurrió un problema. El registro guardado no se perdió; intentá de nuevo.' : error.message,
+      error: error.code === 'ASSET_STORAGE_UNAVAILABLE' ? error.message : status >= 500 ? 'Ocurrio un problema. El registro guardado no se perdio; intenta de nuevo.' : error.message,
       code: error.code || 'INTERNAL_ERROR',
     });
   }

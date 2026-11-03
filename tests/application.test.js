@@ -77,6 +77,8 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   assert.equal(unaccepted.data.payments.length, 0);
   assert.equal((await api(`/api/admin/products/${product.id}`, { method: 'DELETE', auth: true })).response.status, 200);
   assert.equal((await api('/api/catalog')).data.length, 0);
+  assert.equal((await db.prepare('SELECT COUNT(*) AS count FROM order_items WHERE product_id = ?').get(product.id)).count, 1);
+  assert.equal((await track({ id: orderResult.data.id, token })).data.items[0].name, 'Producto editado');
   const paymentBeforeFreight = await api('/api/track/payment', { method: 'POST', body: { id: orderResult.data.id, token, method: 'transfer' } });
   assert.equal(paymentBeforeFreight.response.status, 400);
 

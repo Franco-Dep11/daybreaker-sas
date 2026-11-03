@@ -23,7 +23,7 @@ const state = {
   products: [],
   cart: loadCart(),
   quoteDraft: [],
-  admin: { authenticated: false, tab: 'products', productEdit: null, orders: [], quotes: [], products: [], filter: {} },
+  admin: { authenticated: false, tab: 'products', productEdit: null, orders: [], quotes: [], products: [], categories: [], productCategory: '', productVisibility: '', filter: {} },
   toastTimer: 0,
   routeVersion: 0,
 };
@@ -212,10 +212,11 @@ function productPageMarkup(product) {
     ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}">`
     : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
   const canBuy = product.availability === 'available';
+  const gallery = (product.images || []).length > 1 ? `<div class="product-gallery">${product.images.map(image => `<img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText || product.name)}" loading="lazy">`).join('')}</div>` : '';
   return shell(`<section class="section"><div class="section-shell">
     <p class="kicker"><a href="/catalogo">Catálogo</a> / Ficha de producto</p>
     <div class="split-layout product-detail-layout">
-      <div class="product-image product-detail-image">${image}${availabilityBadge(product.availability)}</div>
+      <div><div class="product-image product-detail-image">${image}${availabilityBadge(product.availability)}</div>${gallery}</div>
       <div><span class="eyebrow">Ficha de producto</span><h1 class="product-title">${escapeHtml(product.name)}</h1>
         ${availabilityBadge(product.availability)}<p class="product-description">${escapeHtml(product.shortDescription || 'La descripción comercial se completará con los datos aprobados por DAYBREAKER.')}</p>
         <span class="product-price-label">Precio minorista</span><strong class="product-price product-price-detail">${money(product.retailPriceCents)}</strong>
@@ -399,19 +400,33 @@ function moneyStatus(order) { return statusText[order.status] || order.status; }
 
 function productForm(product = null) {
   const editing = Boolean(product);
-  return `<form class="panel-card admin-product-form" id="admin-product-form" data-product-id="${editing ? escapeHtml(product.id) : ''}">
-    <h2>${editing ? 'Editar producto' : 'Agregar producto'}</h2><p class="form-intro">Ingresá el precio minorista vigente; el panel lo guardará en centavos para evitar diferencias de redondeo. No se cargan imágenes ni archivos en esta etapa.</p>
+  const categories = state.admin.categories;
+  const categoryId = product?.categoryId || '';
+  const chosenCategory = categories.find(category => category.id === categoryId);
+  return `<form class="admin-product-form" id="admin-product-form" data-product-id="${editing ? escapeHtml(product.id) : ''}">
+    <div class="admin-form-heading"><div><span class="eyebrow">${editing ? 'Ficha existente' : 'Nuevo registro'}</span><h2>${editing ? 'Editar producto' : 'Alta de producto'}</h2>${editing ? `<p>Estás editando: <strong>${escapeHtml(product.name)}</strong></p>` : '<p>Administra los datos y la visibilidad de la tienda.</p>'}</div>${editing ? '<button class="button button-outline button-small" type="button" data-action="cancel-product-edit">Cancelar</button>' : ''}</div>
     <div class="admin-product-grid">
-      <div class="field"><label for="admin-product-name">Nombre</label><input id="admin-product-name" name="name" value="${escapeHtml(product?.name || '')}" maxlength="120" required></div>
-      <div class="field"><label for="admin-product-slug">URL</label><input id="admin-product-slug" name="slug" value="${escapeHtml(product?.slug || '')}" maxlength="120" placeholder="Se genera desde el nombre"></div>
+      <div class="field field-full"><label for="admin-product-name">Nombre del producto</label><input id="admin-product-name" name="name" value="${escapeHtml(product?.name || '')}" maxlength="120" required></div>
+      <div class="field"><label for="admin-product-category">Categoría</label><div class="admin-select-add"><select id="admin-product-category" name="categoryId"><option value="">Sin categoría</option>${categories.map(category => `<option value="${escapeHtml(category.id)}" ${category.id === categoryId ? 'selected' : ''}>${escapeHtml(category.name)}</option>`).join('')}</select><button class="button button-outline button-small" type="button" data-action="add-category" aria-label="Crear categoría">+</button></div></div>
+      <div class="field"><label for="admin-product-subcategory">Subcategoría o línea</label><div class="admin-select-add"><select id="admin-product-subcategory" name="subcategoryId"><option value="">Sin subcategoría</option>${(chosenCategory?.subcategories || []).map(sub => `<option value="${escapeHtml(sub.id)}" ${sub.id === product?.subcategoryId ? 'selected' : ''}>${escapeHtml(sub.name)}</option>`).join('')}</select><button class="button button-outline button-small" type="button" data-action="add-subcategory" ${chosenCategory ? '' : 'disabled'} aria-label="Crear subcategoría">+</button></div></div>
+      <div class="field"><label for="admin-product-stock">Stock disponible</label><input id="admin-product-stock" name="stockQuantity" type="number" min="0" step="1" value="${product?.stockQuantity ?? 0}" required></div>
       <div class="field"><label for="admin-product-price">Precio minorista (ARS)</label><input id="admin-product-price" name="retailPrice" value="${product ? moneyInput(product.retailPriceCents) : ''}" inputmode="decimal" placeholder="12.345,67" required></div>
-      <div class="field"><label for="admin-product-availability">Disponibilidad</label><select id="admin-product-availability" name="availability"><option value="available" ${product?.availability === 'available' ? 'selected' : ''}>Disponible</option><option value="sold_out" ${product?.availability === 'sold_out' ? 'selected' : ''}>Agotado</option><option value="on_request" ${product?.availability === 'on_request' ? 'selected' : ''}>A pedido</option></select></div>
-      <div class="field field-full"><label for="admin-product-description">Descripción breve</label><textarea id="admin-product-description" name="shortDescription" maxlength="1000">${escapeHtml(product?.shortDescription || '')}</textarea></div>
-      <div class="field field-full"><label for="admin-product-specs">Especificaciones técnicas</label><textarea id="admin-product-specs" name="specifications" maxlength="5000">${escapeHtml(product?.specifications || '')}</textarea></div>
-      ${editing ? `<label class="field field-full active-product-label"><input type="checkbox" name="active" ${product.active ? 'checked' : ''}> Producto visible en el catálogo</label>` : ''}
-    </div><div id="admin-product-error" class="form-error" role="alert" hidden></div>
-    <div class="form-actions"><button class="button button-accent" type="submit">${editing ? 'Guardar cambios' : 'Guardar producto'}</button>${editing ? '<button class="button button-outline" type="button" data-action="cancel-product-edit">Cancelar</button>' : ''}</div>
+      <div class="field"><label for="admin-product-availability">Disponibilidad comercial</label><select id="admin-product-availability" name="availability"><option value="available" ${product?.availability === 'available' ? 'selected' : ''}>Disponible</option><option value="sold_out" ${product?.availability === 'sold_out' ? 'selected' : ''}>Agotado</option><option value="on_request" ${product?.availability === 'on_request' ? 'selected' : ''}>A pedido</option></select></div>
+      <div class="field field-full"><label for="admin-product-image">Imagen principal (URL segura)</label><input id="admin-product-image" name="imageUrl" type="url" value="${escapeHtml(product?.imageUrl || '')}" placeholder="https://..."></div>
+      <div class="field field-full"><span class="field-label">Galeria de imagenes, hasta seis</span><div class="admin-image-drop" data-image-drop><label for="admin-product-files">Arrastra imagenes aqui o <span>busca archivos</span><input id="admin-product-files" data-product-images type="file" accept="image/jpeg,image/png,image/webp" multiple></label><small>JPEG, PNG o WebP. Maximo 4 MB cada una. Requiere R2 en Cloudflare.</small><div class="admin-image-grid" data-selected-preview></div></div><div class="admin-image-grid">${(product?.images || []).map(image => `<div class="admin-image-card"><img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText || product.name)}"><div><button type="button" data-action="set-primary-image" data-product-id="${escapeHtml(product.id)}" data-image-id="${escapeHtml(image.id)}" aria-label="Usar como portada" title="Usar como portada">${image.isPrimary ? 'Portada' : '☆'}</button><button type="button" data-action="remove-product-image" data-product-id="${escapeHtml(product.id)}" data-image-id="${escapeHtml(image.id)}" aria-label="Quitar imagen" title="Quitar imagen">×</button></div></div>`).join('')}</div></div>
+      <div class="field field-full"><label for="admin-product-description">Descripción</label><textarea id="admin-product-description" name="shortDescription" maxlength="1000">${escapeHtml(product?.shortDescription || '')}</textarea></div>
+      <div class="field field-full"><label for="admin-product-specs">Especificaciones tecnicas</label><textarea id="admin-product-specs" name="specifications" maxlength="5000" placeholder="Capacidad: …&#10;Material: …&#10;Dimensiones: …">${escapeHtml(product?.specifications || '')}</textarea><small>Formato libre: adaptalo a cada producto.</small></div>
+      <div class="field field-full"><span class="field-label">Atributos del producto</span><div class="admin-attributes">${(product?.attributes || []).map(attribute => `<div class="admin-attribute-row" data-attribute-row><input name="attributeName" aria-label="Nombre del atributo" placeholder="Ej. Material" value="${escapeHtml(attribute.name)}"><input name="attributeValue" aria-label="Valor del atributo" placeholder="Ej. Acero" value="${escapeHtml(attribute.value)}"><button class="admin-icon-button danger" type="button" data-action="remove-attribute" aria-label="Quitar atributo">×</button></div>`).join('')}</div><button class="button button-outline button-small" type="button" data-action="add-attribute">Agregar atributo</button><small>Agrega solo propiedades relevantes para este producto.</small></div>
+      <label class="field-full admin-visibility"><input type="checkbox" name="visibleInStore" ${product?.visibleInStore !== false ? 'checked' : ''}> Mostrar este producto en la tienda</label>
+    </div><div id="admin-product-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-accent" type="submit">${editing ? 'Guardar cambios' : 'Crear producto'}</button></div>
   </form>`;
+}
+
+function renderProductCatalog() {
+  const admin = state.admin; const category = admin.categories.find(item => item.id === admin.productCategory);
+  const products = admin.productCategory ? admin.products.filter(product => (admin.productCategory === '__none__' ? !product.categoryId : product.categoryId === admin.productCategory) && (!admin.productVisibility || (admin.productVisibility === 'archived' ? !product.active : product.active && (admin.productVisibility === 'visible' ? product.visibleInStore : !product.visibleInStore)))) : [];
+  const list = !admin.productCategory ? '<div class="admin-catalog-empty"><strong>Elegí una categoría</strong><span>Seleccioná una categoría para ver sus productos.</span></div>' : products.length ? products.map(product => `<article class="admin-product-row"><div class="admin-product-thumb">${product.imageUrl ? `<img src="${escapeHtml(product.imageUrl)}" alt="" loading="lazy">` : '<span>DB</span>'}</div><div class="admin-product-info"><strong>${escapeHtml(product.name)}</strong><small>${escapeHtml(product.categoryName || category?.name || 'Sin categoría')}${product.subcategoryName ? ` ? ${escapeHtml(product.subcategoryName)}` : ''}</small><b>${money(product.retailPriceCents)}</b><span class="badge ${!product.active ? 'badge-muted' : product.visibleInStore ? 'badge-success' : 'badge-muted'}">${!product.active ? 'Archivado' : product.visibleInStore ? 'Visible' : 'Oculto'}</span></div><div class="admin-product-tools"><button class="admin-icon-button" type="button" data-action="edit-product" data-product-id="${escapeHtml(product.id)}" aria-label="Editar ${escapeHtml(product.name)}" title="Editar">&#9998;</button>${product.active ? `<button class="admin-icon-button" type="button" data-action="toggle-visibility" data-product-id="${escapeHtml(product.id)}" aria-label="${product.visibleInStore ? 'Ocultar' : 'Mostrar'} ${escapeHtml(product.name)}" title="${product.visibleInStore ? 'Ocultar' : 'Mostrar'}">${product.visibleInStore ? '&#9673;' : '&#8856;'}</button><button class="admin-icon-button danger" type="button" data-action="archive-product" data-product-id="${escapeHtml(product.id)}" aria-label="Archivar ${escapeHtml(product.name)}" title="Archivar">&#128465;</button>` : ''}</div></article>`).join('') : '<div class="admin-catalog-empty"><strong>Sin productos</strong><span>No hay productos para este filtro.</span></div>';
+  return `<section class="admin-catalog"><div class="admin-toolbar"><div><span class="eyebrow">Inventario comercial</span><h2>Productos cargados</h2></div><span class="badge badge-muted">${products.length}</span></div><div class="admin-catalog-filters"><label><span>Categoría</span><select class="filter-control" data-product-category><option value="">Seleccionar categoría</option><option value="__none__" ${admin.productCategory === '__none__' ? 'selected' : ''}>Sin categoría</option>${admin.categories.map(item => `<option value="${escapeHtml(item.id)}" ${item.id === admin.productCategory ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select></label><label><span>Estado</span><select class="filter-control" data-product-visibility><option value="">Todos</option><option value="visible" ${admin.productVisibility === 'visible' ? 'selected' : ''}>Visibles</option><option value="hidden" ${admin.productVisibility === 'hidden' ? 'selected' : ''}>Ocultos</option><option value="archived" ${admin.productVisibility === 'archived' ? 'selected' : ''}>Archivados</option></select></label></div><div class="admin-product-list">${list}</div></section>`;
 }
 
 function orderCard(order) {
@@ -469,9 +484,7 @@ function filteredQuotes() {
 function renderAdminContent() {
   const admin = state.admin;
   if (admin.tab === 'products') {
-    const products = admin.products;
-    const list = products.length ? `<div class="admin-list">${products.map(product => `<article class="admin-item"><div class="admin-item-head"><div><h3>${escapeHtml(product.name)}</h3><p>/${escapeHtml(product.slug)}</p></div>${product.active ? availabilityBadge(product.availability) : '<span class="badge badge-muted">Archivado</span>'}</div><div class="admin-meta"><span>Precio: ${money(product.retailPriceCents)}</span><span>${product.active ? 'Visible en el catálogo' : 'No visible'}</span><span>Actualizado ${dateTime(product.updatedAt)}</span></div><div class="admin-actions"><button class="button button-outline button-small" type="button" data-action="edit-product" data-product-id="${escapeHtml(product.id)}">Editar</button>${product.active ? `<button class="button button-outline button-small" type="button" data-action="archive-product" data-product-id="${escapeHtml(product.id)}">Desactivar</button>` : ''}</div></article>`).join('')}</div>` : '<div class="empty-state"><h3>Aún no hay productos cargados.</h3><p>La ficha de producto, precio y disponibilidad ya están preparadas. Agregá un producto solo cuando DAYBREAKER confirme los datos vigentes.</p></div>';
-    return `${productForm(admin.productEdit)}<div class="admin-toolbar"><h2>Catálogo administrativo</h2><span class="badge badge-muted">${products.length} productos</span></div>${list}`;
+    return `<div class="admin-products-layout">${productForm(admin.productEdit)}${renderProductCatalog()}</div>`;
   }
   if (admin.tab === 'orders') {
     const orders = filteredOrders();
@@ -497,12 +510,13 @@ async function adminPage() {
     return `<section class="admin-shell"><div class="section-shell"><form id="admin-login-form" class="panel-card admin-login"><span class="eyebrow">Acceso restringido</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Ingresá la contraseña interna configurada para esta instalación.</p><div class="field"><label for="admin-password">Contraseña</label><input id="admin-password" name="password" type="password" autocomplete="current-password" minlength="16" required></div><div id="admin-login-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-dark" type="submit">Iniciar sesión</button><a class="button button-outline" href="/">Volver</a></div></form></div></section>`;
   }
   try {
-    const [products, orders, quotes] = await Promise.all([
-      api('/api/admin/products'), api('/api/admin/orders'), api('/api/admin/quotes'),
+    const [products, orders, quotes, categories] = await Promise.all([
+      api('/api/admin/products'), api('/api/admin/orders'), api('/api/admin/quotes'), api('/api/admin/categories'),
     ]);
     state.admin.products = products;
     state.admin.orders = orders;
     state.admin.quotes = quotes;
+    state.admin.categories = categories;
   } catch (error) {
     return `<section class="admin-shell"><div class="section-shell"><div class="notice">${escapeHtml(error.message)}</div></div></section>`;
   }
@@ -510,7 +524,7 @@ async function adminPage() {
   const pendingOrders = state.admin.orders.filter(order => !['delivered','canceled'].includes(order.status)).length;
   const pendingQuotes = state.admin.quotes.filter(quote => quote.status === 'pending').length;
   return `<section class="admin-shell"><div class="section-shell">
-    <div class="admin-top"><div><span class="eyebrow">Operación DAYBREAKER</span><h1>Panel administrativo</h1></div><button class="button button-outline" type="button" data-action="admin-logout">Cerrar sesión</button></div>
+    <div class="admin-top"><div><span class="eyebrow">DAYBREAKER S.A.S.</span><h1>Panel administrador</h1><p>Administra los productos que se mostraran en la tienda.</p></div><div class="admin-top-actions"><a class="button button-outline" href="/">Ver tienda</a><button class="button button-outline" type="button" data-action="admin-logout">Cerrar sesion</button></div></div>
     <div class="feature-strip admin-summary"><div class="feature-cell"><strong>${state.admin.products.filter(product => product.active).length} productos activos</strong><span>Catálogo y precios minoristas</span></div><div class="feature-cell"><strong>${pendingOrders} pedidos abiertos</strong><span>Compras y pagos por verificar</span></div><div class="feature-cell"><strong>${pendingQuotes} presupuestos pendientes</strong><span>Consultas mayoristas</span></div></div>
     ${adminTabs(state.admin.tab)}<div id="admin-content">${content}</div>
   </div></section>`;
@@ -656,6 +670,45 @@ async function handleAction(button) {
     render(); return;
   }
   if (action === 'cancel-product-edit') { state.admin.productEdit = null; render(); return; }
+  if (action === 'add-category') {
+    const name = prompt('Nombre de la nueva categoria'); if (!name?.trim()) return;
+    try { const category = await api('/api/admin/categories', { method: 'POST', body: { name: name.trim() } }); state.admin.categories = await api('/api/admin/categories');
+      const formSelect = document.querySelector('#admin-product-category'); formSelect?.add(new Option(category.name, category.id)); if (formSelect) { formSelect.value = category.id; formSelect.dispatchEvent(new Event('change', { bubbles: true })); }
+      const filter = document.querySelector('[data-product-category]'); filter?.add(new Option(category.name, category.id)); state.admin.productCategory = category.id;
+      showToast('Categoria creada.');
+    } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'add-subcategory') {
+    const categoryId = document.querySelector('#admin-product-category')?.value; const name = prompt('Nombre de la subcategoria o linea'); if (!categoryId || !name?.trim()) return;
+    try { const subcategory = await api(`/api/admin/categories/${categoryId}/subcategories`, { method: 'POST', body: { name: name.trim() } }); state.admin.categories = await api('/api/admin/categories'); const select = document.querySelector('#admin-product-subcategory'); select?.add(new Option(subcategory.name, subcategory.id)); if (select) select.value = subcategory.id; showToast('Subcategoria creada.'); } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'toggle-visibility') {
+    const product = state.admin.products.find(item => item.id === button.dataset.productId); if (!product) return;
+    button.disabled = true;
+    try { await api(`/api/admin/products/${product.id}`, { method: 'PUT', body: { ...product, retailPrice: (product.retailPriceCents / 100).toFixed(2), visibleInStore: !product.visibleInStore } }); showToast(product.visibleInStore ? 'Producto oculto.' : 'Producto visible.'); render(); } catch (error) { button.disabled = false; showToast(error.message); }
+    return;
+  }
+  if (action === 'set-primary-image' || action === 'remove-product-image') {
+    const productId = button.dataset.productId; const imageId = button.dataset.imageId;
+    try {
+      if (action === 'remove-product-image' && !confirm('Quitar esta imagen de la ficha?')) return;
+      await api(`/api/admin/products/${productId}/images/${imageId}`, { method: action === 'set-primary-image' ? 'PUT' : 'DELETE', body: {} });
+      state.admin.products = await api('/api/admin/products'); state.admin.productEdit = state.admin.products.find(item => item.id === productId) || null; showToast(action === 'set-primary-image' ? 'Portada actualizada.' : 'Imagen quitada.'); render();
+    } catch (error) { showToast(error.message); }
+    return;
+  }
+  if (action === 'add-attribute') {
+    const list = document.querySelector('.admin-attributes');
+    if (list && list.children.length < 40) {
+      const row = document.createElement('div'); row.className = 'admin-attribute-row'; row.dataset.attributeRow = '';
+      row.innerHTML = '<input name="attributeName" aria-label="Nombre del atributo" placeholder="Ej. Material"><input name="attributeValue" aria-label="Valor del atributo" placeholder="Ej. Acero"><button class="admin-icon-button danger" type="button" data-action="remove-attribute" aria-label="Quitar atributo">×</button>';
+      list.append(row); row.querySelector('input')?.focus();
+    }
+    return;
+  }
+  if (action === 'remove-attribute') { button.closest('[data-attribute-row]')?.remove(); return; }
   if (action === 'archive-product') {
     if (!confirm('¿Desactivar este producto del catálogo? Los pedidos anteriores conservarán su descripción e importe.')) return;
     try { await api(`/api/admin/products/${button.dataset.productId}`, { method: 'DELETE' }); showToast('Producto desactivado.'); render(); }
@@ -749,16 +802,38 @@ async function handleSubmit(form) {
   if (form.id === 'admin-product-form') {
     const errorBox = document.querySelector('#admin-product-error');
     errorBox.hidden = true;
+    if (!form.dataset.saving) {
+    const submitButton = form.querySelector('[type="submit"]');
+    submitButton.disabled = true; form.dataset.saving = 'true';
     const body = {
-      name: data.get('name'), slug: data.get('slug'), retailPrice: data.get('retailPrice'),
+      name: data.get('name'), retailPrice: data.get('retailPrice'), imageUrl: data.get('imageUrl'),
       availability: data.get('availability'), shortDescription: data.get('shortDescription'), specifications: data.get('specifications'),
+      categoryId: data.get('categoryId'), subcategoryId: data.get('subcategoryId'), stockQuantity: Number(data.get('stockQuantity')),
+      visibleInStore: data.get('visibleInStore') === 'on',
+      attributes: [...form.querySelectorAll('[data-attribute-row]')].map(row => ({ name: row.querySelector('[name="attributeName"]').value.trim(), value: row.querySelector('[name="attributeValue"]').value.trim() })).filter(attribute => attribute.name && attribute.value),
     };
-    if (form.dataset.productId) body.active = form.querySelector('[name="active"]').checked;
+    const originalProduct = form.dataset.productId ? state.admin.products.find(item => item.id === form.dataset.productId) : null;
+    if (originalProduct) body.active = originalProduct.active;
+    const files = [...(form.querySelector('[data-product-images]')?.files || [])];
+    if ((originalProduct?.images?.length || 0) + files.length > 6) { errorBox.textContent = 'Cada producto puede tener hasta seis imagenes.'; errorBox.hidden = false; submitButton.disabled = false; delete form.dataset.saving; return; }
+    if (files.some(file => !['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 4 * 1024 * 1024)) { errorBox.textContent = 'Usa JPEG, PNG o WebP de hasta 4 MB por imagen.'; errorBox.hidden = false; submitButton.disabled = false; delete form.dataset.saving; return; }
     try {
       const path = form.dataset.productId ? `/api/admin/products/${form.dataset.productId}` : '/api/admin/products';
-      await api(path, { method: form.dataset.productId ? 'PUT' : 'POST', body });
-      state.admin.productEdit = null; state.products = await api('/api/catalog'); showToast('Producto guardado.'); render();
-    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
+      const saved = await api(path, { method: form.dataset.productId ? 'PUT' : 'POST', body });
+      try {
+        for (const file of files) {
+          const upload = await fetch(`/api/admin/products/${saved.id}/images`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type }, body: file });
+          const result = await upload.json().catch(() => ({}));
+          if (!upload.ok) throw new Error(result.error || 'No se pudo guardar una imagen.');
+        }
+      } catch (error) {
+        state.admin.products = await api('/api/admin/products');
+        state.admin.productEdit = state.admin.products.find(item => item.id === saved.id) || saved;
+        showToast(`La ficha se guardo; la imagen no se pudo completar: ${error.message}`); render(); return;
+      }
+      state.admin.productEdit = null; state.admin.productCategory = saved.categoryId || state.admin.productCategory; state.products = await api('/api/catalog'); showToast('Producto guardado.'); render();
+    } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; submitButton.disabled = false; delete form.dataset.saving; }
+    }
     return;
   }
   if (form.id === 'admin-filter-form') {
@@ -804,6 +879,31 @@ document.addEventListener('submit', event => {
 });
 
 document.addEventListener('change', event => {
+  const imageInput = event.target.closest('[data-product-images]');
+  if (imageInput) {
+    for (const url of (state.admin.previewUrls || [])) URL.revokeObjectURL(url);
+    state.admin.previewUrls = [];
+    const preview = document.querySelector('[data-selected-preview]'); preview?.replaceChildren();
+    for (const file of [...imageInput.files]) {
+      const url = URL.createObjectURL(file); state.admin.previewUrls.push(url);
+      const image = document.createElement('img'); image.src = url; image.alt = file.name; image.loading = 'lazy';
+      preview?.append(image);
+    }
+    return;
+  }
+  const productCategory = event.target.closest('[data-product-category]');
+  if (productCategory) { state.admin.productCategory = productCategory.value; render(); return; }
+  const productVisibility = event.target.closest('[data-product-visibility]');
+  if (productVisibility) { state.admin.productVisibility = productVisibility.value; render(); return; }
+  const formCategory = event.target.closest('#admin-product-category');
+  if (formCategory) {
+    const category = state.admin.categories.find(item => item.id === formCategory.value);
+    const select = document.querySelector('#admin-product-subcategory');
+    if (select) select.innerHTML = `<option value="">Sin subcategoría</option>${(category?.subcategories || []).map(item => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join('')}`;
+    const add = formCategory.closest('.field')?.parentElement?.querySelector('[data-action="add-subcategory"]');
+    if (add) add.disabled = !category;
+    return;
+  }
   const quantityInput = event.target.closest('[data-cart-qty]');
   if (quantityInput) {
     const amount = Number(quantityInput.value);
@@ -819,6 +919,16 @@ document.addEventListener('change', event => {
     input.required = custom;
     if (!custom) input.value = '';
   }
+});
+
+document.addEventListener('dragover', event => {
+  if (event.target.closest('[data-image-drop]')) event.preventDefault();
+});
+document.addEventListener('drop', event => {
+  const area = event.target.closest('[data-image-drop]'); if (!area) return;
+  event.preventDefault();
+  const input = area.querySelector('[data-product-images]');
+  if (input && event.dataTransfer?.files?.length) { input.files = event.dataTransfer.files; input.dispatchEvent(new Event('change', { bubbles: true })); }
 });
 
 window.addEventListener('hashchange', render);

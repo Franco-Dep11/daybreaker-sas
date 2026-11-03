@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
@@ -29,7 +29,11 @@ if (!remote) {
   mkdirSync(dirname(databasePath), { recursive: true });
   local = new DatabaseSync(databasePath);
   local.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
-  local.exec(`
+  const existingProducts = local.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'products'").get();
+  if (existingProducts && local.prepare('PRAGMA user_version').get().user_version === 0) local.exec('PRAGMA user_version = 1');
+  const migrationFiles = readdirSync(resolve(process.cwd(), 'migrations')).filter(file => /^\d+_.*\.sql$/.test(file)).sort();
+  if (!existingProducts) {
+    local.exec(`
     CREATE TABLE IF NOT EXISTS products (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, short_description TEXT NOT NULL DEFAULT '', specifications TEXT NOT NULL DEFAULT '', retail_price_cents INTEGER NOT NULL CHECK (retail_price_cents > 0), availability TEXT NOT NULL CHECK (availability IN ('available','sold_out','on_request')), image_url TEXT, technical_pdf_url TEXT, active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, tracking_token_hash TEXT NOT NULL, customer_name TEXT NOT NULL, email TEXT NOT NULL, phone TEXT NOT NULL, address TEXT NOT NULL, province TEXT NOT NULL, locality TEXT NOT NULL, postal_code TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '', subtotal_cents INTEGER NOT NULL CHECK (subtotal_cents > 0), freight_cents INTEGER CHECK (freight_cents IS NULL OR freight_cents >= 0), total_cents INTEGER NOT NULL CHECK (total_cents > 0), status TEXT NOT NULL, carrier TEXT NOT NULL DEFAULT '', shipment_tracking TEXT NOT NULL DEFAULT '', freight_accepted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS order_items (id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id), product_id TEXT, product_slug TEXT NOT NULL, product_name TEXT NOT NULL, unit_price_cents INTEGER NOT NULL CHECK (unit_price_cents > 0), quantity INTEGER NOT NULL CHECK (quantity > 0), line_total_cents INTEGER NOT NULL CHECK (line_total_cents > 0));
@@ -40,7 +44,24 @@ if (!remote) {
     CREATE INDEX IF NOT EXISTS idx_orders_status_created ON orders(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_quotes_status_created ON quotes(status, created_at);
     CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id, created_at);
-  `);
+    `);
+    local.exec('PRAGMA user_version = 1');
+  }
+  let version = local.prepare('PRAGMA user_version').get().user_version;
+  for (const file of migrationFiles) {
+    const migrationVersion = Number(file.match(/^\d+/)[0]);
+    if (migrationVersion <= version) continue;
+    local.exec('BEGIN IMMEDIATE');
+    try {
+      local.exec(readFileSync(resolve(process.cwd(), 'migrations', file), 'utf8'));
+      local.exec(`PRAGMA user_version = ${migrationVersion}`);
+      local.exec('COMMIT');
+      version = migrationVersion;
+    } catch (error) {
+      local.exec('ROLLBACK');
+      throw error;
+    }
+  }
 }
 
 async function remoteRequest(path, payload) {
@@ -60,6 +81,28 @@ export async function verifyConnection() {
   const result = await remoteRequest('/v1/health', {});
   if (result.connected !== true) throw new Error('Cloudflare D1 no confirmó la conexión.');
   return true;
+}
+
+export async function uploadProductAsset(productId, bytes, contentType) {
+  if (!remote) {
+    const error = new Error('La carga de imágenes requiere conectar el Worker con Cloudflare R2.');
+    error.status = 503;
+    error.code = 'ASSET_STORAGE_UNAVAILABLE';
+    throw error;
+  }
+  const response = await fetch(new URL(`/v1/assets/upload?productId=${encodeURIComponent(productId)}`, process.env.D1_PROXY_URL), {
+    method: 'POST', headers: { authorization: `Bearer ${process.env.D1_PROXY_SECRET}`, 'content-type': contentType },
+    body: bytes, signal: AbortSignal.timeout(20000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(result.error || `R2 proxy respondió ${response.status}`);
+    error.statusCode = response.status;
+    error.status = response.status;
+    if (response.status === 503) error.code = 'ASSET_STORAGE_UNAVAILABLE';
+    throw error;
+  }
+  return result;
 }
 
 function statement(sql) {

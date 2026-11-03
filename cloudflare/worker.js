@@ -43,12 +43,37 @@ function validateStatement(statement) {
 
 export default {
   async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === 'GET' && url.pathname.startsWith('/assets/products/')) {
+      if (!/^\/assets\/products\/[a-f0-9-]{36}\/[a-f0-9-]{36}\.(?:jpg|png|webp)$/.test(url.pathname)) return new Response('Not found', { status: 404 });
+      if (!env.ASSETS) return new Response('Image storage is not configured', { status: 503 });
+      const object = await env.ASSETS.get(url.pathname.slice('/assets/'.length));
+      if (!object) return new Response('Not found', { status: 404 });
+      return new Response(object.body, { headers: { 'content-type': object.httpMetadata?.contentType || 'application/octet-stream', 'cache-control': 'public, max-age=31536000, immutable', 'x-content-type-options': 'nosniff' } });
+    }
     if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
     const secret = env.D1_API_SECRET;
     const authorization = request.headers.get('authorization') || '';
     if (!secret || !constantTimeEqual(authorization, `Bearer ${secret}`)) return json({ error: 'Unauthorized' }, 401);
     const path = new URL(request.url).pathname;
     try {
+      if (path === '/v1/assets/upload') {
+        if (!env.ASSETS) return json({ error: 'El almacenamiento de imágenes R2 todavía no está configurado.' }, 503);
+        const productId = url.searchParams.get('productId') || '';
+        if (!/^[a-f0-9-]{36}$/i.test(productId)) return json({ error: 'Producto inválido.' }, 400);
+        const contentType = request.headers.get('content-type') || '';
+        const extension = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' })[contentType];
+        if (!extension) return json({ error: 'Usá imágenes JPEG, PNG o WebP.' }, 415);
+        const bytes = new Uint8Array(await request.arrayBuffer());
+        if (!bytes.length || bytes.byteLength > 4 * 1024 * 1024) return json({ error: 'Cada imagen debe pesar hasta 4 MB.' }, 413);
+        const valid = extension === 'jpg' ? bytes[0] === 0xff && bytes[1] === 0xd8 && bytes.at(-2) === 0xff && bytes.at(-1) === 0xd9
+          : extension === 'png' ? bytes.byteLength >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+            : new TextDecoder().decode(bytes.subarray(0, 4)) === 'RIFF' && new TextDecoder().decode(bytes.subarray(8, 12)) === 'WEBP';
+        if (!valid) return json({ error: 'El archivo no coincide con el formato declarado.' }, 415);
+        const key = `products/${productId}/${crypto.randomUUID()}.${extension}`;
+        await env.ASSETS.put(key, bytes, { httpMetadata: { contentType } });
+        return json({ key, url: new URL(`/assets/${key}`, request.url).href });
+      }
       const body = await readRequest(request);
       if (path === '/v1/health') {
         const row = await env.DB.prepare('SELECT 1 AS connected').first();

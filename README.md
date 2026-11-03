@@ -92,3 +92,22 @@ Para restaurar: detené el servidor, conservá aparte la base actual, copiá el 
 Esta base sirve para revisar el flujo y completar datos. La instalación de producción necesita dominio y HTTPS, gestión de credenciales en el alojamiento, política de copias externa, cuenta administrativa individual para cada responsable, notificaciones de email configuradas y probadas, datos legales aprobados y validación integral de pagos y operaciones con cuentas de prueba. No habilites cobros hasta configurar y verificar Mercado Pago, transferencia y reglas de flete con DAYBREAKER.
 
 Las cuentas y dominios deben quedar bajo titularidad o control de DAYBREAKER. Código, base y documentación están en el proyecto para facilitar la migración.
+
+## Catalogo administrativo y almacenamiento de imagenes
+
+La migracion aditiva `migrations/0002_admin_catalog.sql` agrega categorias, subcategorias, stock informativo, visibilidad independiente del archivado, atributos flexibles y hasta seis registros de imagen por producto. Tambien copia los valores existentes de `image_url` a la tabla de imagenes sin borrar la columna original ni reemplazar registros.
+
+No se ejecuto ninguna migracion remota ni se desplego el Worker. Cuando autorices el cambio remoto, el orden es: aplicar `0002` sobre D1; crear el bucket R2; agregar el binding al `wrangler.toml`; desplegar el Worker actualizado; y luego publicar la rama en Vercel Preview. No despliegues el backend actualizado antes de la migracion y del Worker porque consulta columnas y operaciones que aun no existen en el esquema desplegado.
+
+Para habilitar cargas, crea un bucket privado desde Cloudflare R2 (por ejemplo `daybreaker-product-images`) y agrega al `wrangler.toml`:
+
+```toml
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "daybreaker-product-images"
+```
+
+Despues despliega el Worker desde esta rama y conserva `D1_API_SECRET` configurado como secreto. No se necesita una clave R2 adicional: el Worker accede al bucket mediante el binding nativo. Las cargas se autentican desde la sesion administrativa de Vercel y el Worker verifica el secreto servidor a servidor; el navegador no recibe el secreto. Se aceptan JPEG, PNG y WebP de hasta 4 MB cada uno. Los objetos se sirven publicamente por URL para que las fichas comerciales los muestren; el bucket no permite listado publico.
+
+La interfaz permite asociar URL HTTPS existentes aun antes de configurar R2. Las cargas de archivos responden con error explicito hasta que exista el binding. En desarrollo SQLite, productos, categorias y metadatos persisten localmente; las cargas requieren que el Worker y R2 esten configurados.
+En tu equipo, luego de decidir habilitarlo, crea el bucket con `npx wrangler r2 bucket create daybreaker-product-images` y agrega el binding `ASSETS` indicado arriba. Para D1 ejecuta `npx wrangler d1 migrations apply daybreaker-sas-dev --remote`; despues de crear el binding y revisar el diff, despliega el Worker con `npx wrangler deploy`. Por ultimo, publica esta rama en Vercel Preview. No ejecutes los comandos remotos hasta autorizar ese cambio.
