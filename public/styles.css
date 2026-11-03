@@ -229,6 +229,8 @@ button { cursor: pointer; }
 .contact-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
 
 .admin-shell { min-height: 70vh; padding: 52px 0 76px; background: #e9eae5; }
+.admin-data-loading { min-height: 150px; display: grid; place-items: center; padding: 24px; }
+.admin-data-loading .loading-shell { min-height: 0; display: flex; justify-content: center; }
 .admin-login { max-width: 480px; margin: 40px auto; }
 .admin-top { display: flex; justify-content: space-between; align-items: end; gap: 18px; margin-bottom: 25px; }
 .admin-top h1 { margin: 8px 0 0; font-size: clamp(32px, 5vw, 48px); letter-spacing: -.05em; }

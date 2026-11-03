@@ -1,6 +1,7 @@
 const app = document.querySelector('#app');
 const toastBox = document.querySelector('#toast');
 const cartStorageKey = 'daybreaker-cart-v1';
+const adminSessionMaxAgeMs = 60_000;
 const statusText = {
   received: 'Pedido recibido',
   freight_quoted: 'Flete cotizado',
@@ -23,7 +24,7 @@ const state = {
   products: [],
   cart: loadCart(),
   quoteDraft: [],
-  admin: { authenticated: false, tab: 'products', productEdit: null, orders: [], quotes: [], products: [], categories: [], productCategory: '', productVisibility: '', filter: {} },
+  admin: { authenticated: false, authStatus: 'unknown', validatedAt: 0, sessionRequest: null, routeActive: false, tab: 'products', productEdit: null, orders: [], quotes: [], products: [], categories: [], loaded: {}, errors: {}, requests: {}, productCategory: '', productVisibility: '', filter: {} },
   toastTimer: 0,
   routeVersion: 0,
 };
@@ -68,7 +69,14 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || 'No se pudo completar la solicitud.');
+  if (!response.ok) {
+    const error = new Error(data.error || 'No se pudo completar la solicitud.'); error.status = response.status;
+    if (response.status === 401 && path.startsWith('/api/admin/') && path !== '/api/admin/login') {
+      clearAdminPrivateData();
+      if (state.admin.routeActive) render();
+    }
+    throw error;
+  }
   return data;
 }
 
@@ -483,6 +491,11 @@ function filteredQuotes() {
 
 function renderAdminContent() {
   const admin = state.admin;
+  const key = admin.tab === 'products' ? 'products' : admin.tab;
+  if (!admin.loaded[key]) {
+    const error = admin.errors[key];
+    return `<div class="admin-data-loading" role="status" aria-live="polite">${error ? `<div class="notice" role="alert">${escapeHtml(error)} <button class="button button-outline button-small" type="button" data-action="retry-admin-data">Reintentar</button></div>` : '<span class="loading-shell"><span class="loading-spinner"></span><span>Cargando esta sección…</span></span>'}</div>`;
+  }
   if (admin.tab === 'products') {
     return `<div class="admin-products-layout">${productForm(admin.productEdit)}${renderProductCatalog()}</div>`;
   }
@@ -497,35 +510,77 @@ function renderAdminContent() {
   return `<div class="admin-toolbar"><h2>Solicitudes mayoristas</h2><span class="badge badge-muted">${quotes.length} encontradas</span></div><form id="admin-filter-form" class="filter-row"><input class="filter-control" name="query" placeholder="Empresa, contacto o email" value="${escapeHtml(admin.filter.query || '')}"><select class="filter-control" name="status"><option value="">Todos los estados</option>${['pending','responded','closed'].map(value => `<option value="${value}" ${admin.filter.status === value ? 'selected' : ''}>${escapeHtml(statusText[value])}</option>`).join('')}</select><input class="filter-control" type="date" name="date" aria-label="Filtrar por fecha" value="${escapeHtml(admin.filter.date || '')}"><button class="button button-dark button-small" type="submit">Filtrar</button><button class="button button-outline button-small" type="button" data-action="clear-admin-filter">Limpiar</button></form>${list}`;
 }
 
-async function adminPage() {
+function clearAdminPrivateData() {
+  Object.assign(state.admin, { authenticated: false, authStatus: 'unauthenticated', validatedAt: 0, productEdit: null, orders: [], quotes: [], products: [], categories: [], loaded: {}, errors: {}, requests: {} });
+}
+
+function loadAdminResource(key) {
+  const admin = state.admin;
+  if (admin.loaded[key]) return Promise.resolve();
+  if (admin.errors[key]) return Promise.resolve();
+  if (admin.requests[key]) return admin.requests[key];
+  const request = (async () => {
+    try {
+      if (key === 'products') {
+        const requests = [api('/api/admin/products')];
+        if (!admin.loaded.categories) requests.push(api('/api/admin/categories'));
+        const [products, categories] = await Promise.all(requests);
+        admin.products = products;
+        if (categories) { admin.categories = categories; admin.loaded.categories = true; }
+      } else if (key === 'orders') admin.orders = await api('/api/admin/orders');
+      else if (key === 'quotes') admin.quotes = await api('/api/admin/quotes');
+      admin.loaded[key] = true;
+      delete admin.errors[key];
+    } catch (error) {
+      if (error.status === 401) clearAdminPrivateData();
+      else admin.errors[key] = error.message;
+    } finally {
+      delete admin.requests[key];
+      if (admin.routeActive) render();
+    }
+  })();
+  admin.requests[key] = request;
+  return request;
+}
+
+function ensureAdminRouteData() {
+  const admin = state.admin;
+  if (!admin.routeActive || !state.config.adminEnabled) return;
+  if (admin.authStatus === 'authenticated') {
+    loadAdminResource(admin.tab === 'products' ? 'products' : admin.tab);
+    return;
+  }
+  if (admin.authStatus === 'checking' || admin.authStatus === 'unauthenticated') return;
+  admin.authStatus = 'checking';
+  admin.sessionRequest = api('/api/admin/session').then(session => {
+    admin.authStatus = session.authenticated ? 'authenticated' : 'unauthenticated';
+    admin.authenticated = session.authenticated;
+    admin.validatedAt = Date.now();
+  }).catch(() => {
+    admin.authStatus = 'unauthenticated'; admin.authenticated = false; admin.validatedAt = 0;
+  }).finally(() => {
+    admin.sessionRequest = null;
+    if (admin.routeActive) render();
+  });
+}
+
+function adminPage() {
   navActive('');
   if (!state.config.adminEnabled) {
     return `<section class="admin-shell"><div class="section-shell"><div class="panel-card admin-login"><span class="eyebrow">Panel interno</span><h1 class="admin-login-title">Acceso no habilitado</h1><p class="form-intro">Configurá una contraseña administrativa en el archivo local .env para abrir el panel. La contraseña no tiene un valor predeterminado.</p><a class="button button-outline" href="/">Volver al sitio</a></div></div></section>`;
   }
-  try {
-    const session = await api('/api/admin/session');
-    state.admin.authenticated = session.authenticated;
-  } catch { state.admin.authenticated = false; }
-  if (!state.admin.authenticated) {
+  if (state.admin.authStatus === 'unknown' || state.admin.authStatus === 'checking') {
+    return `<section class="admin-shell"><div class="section-shell"><div class="panel-card admin-login" role="status" aria-live="polite"><span class="eyebrow">Panel interno</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Verificando el acceso…</p><span class="loading-shell"><span class="loading-spinner"></span><span>Un momento</span></span></div></div></section>`;
+  }
+  if (state.admin.authStatus !== 'authenticated') {
     return `<section class="admin-shell"><div class="section-shell"><form id="admin-login-form" class="panel-card admin-login"><span class="eyebrow">Acceso restringido</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Ingresá la contraseña interna configurada para esta instalación.</p><div class="field"><label for="admin-password">Contraseña</label><input id="admin-password" name="password" type="password" autocomplete="current-password" minlength="16" required></div><div id="admin-login-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-dark" type="submit">Iniciar sesión</button><a class="button button-outline" href="/">Volver</a></div></form></div></section>`;
   }
-  try {
-    const [products, orders, quotes, categories] = await Promise.all([
-      api('/api/admin/products'), api('/api/admin/orders'), api('/api/admin/quotes'), api('/api/admin/categories'),
-    ]);
-    state.admin.products = products;
-    state.admin.orders = orders;
-    state.admin.quotes = quotes;
-    state.admin.categories = categories;
-  } catch (error) {
-    return `<section class="admin-shell"><div class="section-shell"><div class="notice">${escapeHtml(error.message)}</div></div></section>`;
-  }
   const content = renderAdminContent();
-  const pendingOrders = state.admin.orders.filter(order => !['delivered','canceled'].includes(order.status)).length;
-  const pendingQuotes = state.admin.quotes.filter(quote => quote.status === 'pending').length;
+  const pendingOrders = state.admin.loaded.orders ? state.admin.orders.filter(order => !['delivered','canceled'].includes(order.status)).length : '—';
+  const pendingQuotes = state.admin.loaded.quotes ? state.admin.quotes.filter(quote => quote.status === 'pending').length : '—';
   return `<section class="admin-shell"><div class="section-shell">
     <div class="admin-top"><div><span class="eyebrow">DAYBREAKER S.A.S.</span><h1>Panel administrador</h1><p>Administra los productos que se mostraran en la tienda.</p></div><div class="admin-top-actions"><a class="button button-outline" href="/">Ver tienda</a><button class="button button-outline" type="button" data-action="admin-logout">Cerrar sesion</button></div></div>
-    <div class="feature-strip admin-summary"><div class="feature-cell"><strong>${state.admin.products.filter(product => product.active).length} productos activos</strong><span>Catálogo y precios minoristas</span></div><div class="feature-cell"><strong>${pendingOrders} pedidos abiertos</strong><span>Compras y pagos por verificar</span></div><div class="feature-cell"><strong>${pendingQuotes} presupuestos pendientes</strong><span>Consultas mayoristas</span></div></div>
+    <div class="feature-strip admin-summary"><div class="feature-cell"><strong>${state.admin.loaded.products ? state.admin.products.filter(product => product.active).length : "—"} productos activos</strong><span>Catálogo y precios minoristas</span></div><div class="feature-cell"><strong>${pendingOrders} pedidos abiertos</strong><span>Compras y pagos por verificar</span></div><div class="feature-cell"><strong>${pendingQuotes} presupuestos pendientes</strong><span>Consultas mayoristas</span></div></div>
     ${adminTabs(state.admin.tab)}<div id="admin-content">${content}</div>
   </div></section>`;
 }
@@ -564,12 +619,18 @@ async function routePage() {
 
 async function render() {
   const version = ++state.routeVersion;
+  const pathname = window.location.pathname;
+  const isAdminRoute = (pathname === '/' || pathname === '/index.html') && window.location.hash === '#admin';
+  if (isAdminRoute && !state.admin.routeActive) state.admin.authStatus = 'unknown';
+  if (isAdminRoute && state.admin.authStatus === 'authenticated' && Date.now() - state.admin.validatedAt > adminSessionMaxAgeMs) state.admin.authStatus = 'unknown';
+  state.admin.routeActive = isAdminRoute;
   app.setAttribute('aria-busy', 'true');
   try {
     const content = await routePage();
     if (version !== state.routeVersion) return;
     app.innerHTML = content;
     app.setAttribute('aria-busy', 'false');
+    if (isAdminRoute) ensureAdminRouteData();
     if (window.location.pathname === '/presupuestos-mayoristas' && state.quoteDraft.length) {
       document.querySelector('#quote-items')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
@@ -665,6 +726,12 @@ async function handleAction(button) {
     state.admin.filter = {};
     render(); return;
   }
+  if (action === 'retry-admin-data') {
+    const key = state.admin.tab === 'products' ? 'products' : state.admin.tab;
+    delete state.admin.errors[key];
+    loadAdminResource(key);
+    render(); return;
+  }
   if (action === 'edit-product') {
     state.admin.productEdit = state.admin.products.find(product => product.id === button.dataset.productId) || null;
     render(); return;
@@ -672,7 +739,7 @@ async function handleAction(button) {
   if (action === 'cancel-product-edit') { state.admin.productEdit = null; render(); return; }
   if (action === 'add-category') {
     const name = prompt('Nombre de la nueva categoria'); if (!name?.trim()) return;
-    try { const category = await api('/api/admin/categories', { method: 'POST', body: { name: name.trim() } }); state.admin.categories = await api('/api/admin/categories');
+    try { const category = await api('/api/admin/categories', { method: 'POST', body: { name: name.trim() } }); state.admin.categories.push(category);
       const formSelect = document.querySelector('#admin-product-category'); formSelect?.add(new Option(category.name, category.id)); if (formSelect) { formSelect.value = category.id; formSelect.dispatchEvent(new Event('change', { bubbles: true })); }
       const filter = document.querySelector('[data-product-category]'); filter?.add(new Option(category.name, category.id)); state.admin.productCategory = category.id;
       showToast('Categoria creada.');
@@ -681,13 +748,13 @@ async function handleAction(button) {
   }
   if (action === 'add-subcategory') {
     const categoryId = document.querySelector('#admin-product-category')?.value; const name = prompt('Nombre de la subcategoria o linea'); if (!categoryId || !name?.trim()) return;
-    try { const subcategory = await api(`/api/admin/categories/${categoryId}/subcategories`, { method: 'POST', body: { name: name.trim() } }); state.admin.categories = await api('/api/admin/categories'); const select = document.querySelector('#admin-product-subcategory'); select?.add(new Option(subcategory.name, subcategory.id)); if (select) select.value = subcategory.id; showToast('Subcategoria creada.'); } catch (error) { showToast(error.message); }
+    try { const subcategory = await api(`/api/admin/categories/${categoryId}/subcategories`, { method: 'POST', body: { name: name.trim() } }); const category = state.admin.categories.find(item => item.id === categoryId); if (category) category.subcategories.push(subcategory); const select = document.querySelector('#admin-product-subcategory'); select?.add(new Option(subcategory.name, subcategory.id)); if (select) select.value = subcategory.id; showToast('Subcategoria creada.'); } catch (error) { showToast(error.message); }
     return;
   }
   if (action === 'toggle-visibility') {
     const product = state.admin.products.find(item => item.id === button.dataset.productId); if (!product) return;
     button.disabled = true;
-    try { await api(`/api/admin/products/${product.id}`, { method: 'PUT', body: { ...product, retailPrice: (product.retailPriceCents / 100).toFixed(2), visibleInStore: !product.visibleInStore } }); showToast(product.visibleInStore ? 'Producto oculto.' : 'Producto visible.'); render(); } catch (error) { button.disabled = false; showToast(error.message); }
+    try { const saved = await api(`/api/admin/products/${product.id}`, { method: 'PUT', body: { ...product, retailPrice: (product.retailPriceCents / 100).toFixed(2), visibleInStore: !product.visibleInStore } }); Object.assign(product, saved); state.products = state.products.filter(item => item.id !== product.id); if (product.active && product.visibleInStore) state.products.push(product); showToast(product.visibleInStore ? 'Producto visible.' : 'Producto oculto.'); render(); } catch (error) { button.disabled = false; showToast(error.message); }
     return;
   }
   if (action === 'set-primary-image' || action === 'remove-product-image') {
@@ -695,7 +762,7 @@ async function handleAction(button) {
     try {
       if (action === 'remove-product-image' && !confirm('Quitar esta imagen de la ficha?')) return;
       await api(`/api/admin/products/${productId}/images/${imageId}`, { method: action === 'set-primary-image' ? 'PUT' : 'DELETE', body: {} });
-      state.admin.products = await api('/api/admin/products'); state.admin.productEdit = state.admin.products.find(item => item.id === productId) || null; showToast(action === 'set-primary-image' ? 'Portada actualizada.' : 'Imagen quitada.'); render();
+      state.admin.loaded.products = false; state.admin.productEdit = null; render(); loadAdminResource('products'); showToast(action === 'set-primary-image' ? 'Portada actualizada.' : 'Imagen quitada.');
     } catch (error) { showToast(error.message); }
     return;
   }
@@ -711,19 +778,19 @@ async function handleAction(button) {
   if (action === 'remove-attribute') { button.closest('[data-attribute-row]')?.remove(); return; }
   if (action === 'archive-product') {
     if (!confirm('¿Desactivar este producto del catálogo? Los pedidos anteriores conservarán su descripción e importe.')) return;
-    try { await api(`/api/admin/products/${button.dataset.productId}`, { method: 'DELETE' }); showToast('Producto desactivado.'); render(); }
+    try { await api(`/api/admin/products/${button.dataset.productId}`, { method: 'DELETE' }); const product = state.admin.products.find(item => item.id === button.dataset.productId); if (product) product.active = false; state.products = state.products.filter(item => item.id !== button.dataset.productId); showToast('Producto desactivado.'); render(); }
     catch (error) { showToast(error.message); }
     return;
   }
   if (action === 'confirm-transfer') {
     if (!confirm('Confirmá esta transferencia solo después de verificar la acreditación en la cuenta bancaria.')) return;
-    try { await api(`/api/admin/payments/${button.dataset.paymentId}/confirm`, { method: 'PUT', body: {} }); showToast('Transferencia confirmada.'); render(); }
+    try { await api(`/api/admin/payments/${button.dataset.paymentId}/confirm`, { method: 'PUT', body: {} }); const order = state.admin.orders.find(item => item.payments?.some(payment => payment.id === button.dataset.paymentId)); if (order) { order.status = 'payment_confirmed'; const payment = order.payments.find(item => item.id === button.dataset.paymentId); if (payment) payment.status = 'confirmed'; } showToast('Transferencia confirmada.'); render(); }
     catch (error) { showToast(error.message); }
     return;
   }
   if (action === 'admin-logout') {
     try { await api('/api/admin/logout', { method: 'POST', body: {} }); } catch { /* se limpia la sesión visual aunque expire */ }
-    state.admin.authenticated = false; state.admin.productEdit = null; showToast('Sesión cerrada.'); render(); return;
+    clearAdminPrivateData(); showToast('Sesión cerrada.'); render(); return;
   }
   if (action === 'clear-admin-filter') { state.admin.filter = {}; render(); }
 }
@@ -741,7 +808,7 @@ async function handleSubmit(form) {
     errorBox.hidden = true;
     try {
       await api('/api/admin/login', { method: 'POST', body: { password: data.get('password') } });
-      state.admin.authenticated = true; showToast('Sesión iniciada.'); render();
+      state.admin.authenticated = true; state.admin.authStatus = 'authenticated'; state.admin.validatedAt = Date.now(); showToast('Sesión iniciada.'); render();
     } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
     return;
   }
@@ -820,11 +887,19 @@ async function handleSubmit(form) {
     try {
       const path = form.dataset.productId ? `/api/admin/products/${form.dataset.productId}` : '/api/admin/products';
       const saved = await api(path, { method: form.dataset.productId ? 'PUT' : 'POST', body });
+      const existingIndex = state.admin.products.findIndex(item => item.id === saved.id);
+      const existingProduct = existingIndex >= 0 ? state.admin.products[existingIndex] : null;
+      const category = state.admin.categories.find(item => item.id === saved.categoryId);
+      const subcategory = category?.subcategories?.find(item => item.id === saved.subcategoryId);
+      const cachedProduct = { ...existingProduct, ...saved, images: existingProduct?.images || [], categoryName: category?.name || existingProduct?.categoryName || '', subcategoryName: subcategory?.name || existingProduct?.subcategoryName || '' };
+      if (existingIndex >= 0) state.admin.products[existingIndex] = cachedProduct; else state.admin.products.unshift(cachedProduct);
       try {
         for (const file of files) {
           const upload = await fetch(`/api/admin/products/${saved.id}/images`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': file.type }, body: file });
           const result = await upload.json().catch(() => ({}));
           if (!upload.ok) throw new Error(result.error || 'No se pudo guardar una imagen.');
+          cachedProduct.images.push({ id: result.id, url: result.url, altText: result.altText, position: result.position, isPrimary: result.isPrimary });
+          if (result.isPrimary) cachedProduct.imageUrl = result.url;
         }
       } catch (error) {
         state.admin.products = await api('/api/admin/products');
@@ -844,23 +919,26 @@ async function handleSubmit(form) {
   }
   if (form.dataset.adminForm === 'freight') {
     try {
-      await api(`/api/admin/orders/${form.dataset.orderId}/freight`, { method: 'PUT', body: {
+      const updatedOrder = await api(`/api/admin/orders/${form.dataset.orderId}/freight`, { method: 'PUT', body: {
         freight: data.get('freight'), carrier: data.get('carrier'), shipmentTracking: data.get('shipmentTracking'),
       } });
+      const orderIndex = state.admin.orders.findIndex(order => order.id === updatedOrder.id); if (orderIndex >= 0) state.admin.orders[orderIndex] = updatedOrder;
       showToast('Flete guardado. El pedido aparece como pendiente de aceptación.'); render();
     } catch (error) { showToast(error.message); }
     return;
   }
   if (form.dataset.adminForm === 'order-status') {
     try {
-      await api(`/api/admin/orders/${form.dataset.orderId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      const updatedOrder = await api(`/api/admin/orders/${form.dataset.orderId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      const orderIndex = state.admin.orders.findIndex(order => order.id === updatedOrder.id); if (orderIndex >= 0) state.admin.orders[orderIndex] = updatedOrder;
       showToast('Estado del pedido actualizado.'); render();
     } catch (error) { showToast(error.message); }
     return;
   }
   if (form.dataset.adminForm === 'quote-status') {
     try {
-      await api(`/api/admin/quotes/${form.dataset.quoteId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      const updatedQuote = await api(`/api/admin/quotes/${form.dataset.quoteId}/status`, { method: 'PUT', body: { status: data.get('status') } });
+      const quote = state.admin.quotes.find(item => item.id === updatedQuote.id); if (quote) quote.status = updatedQuote.status;
       showToast('Estado de la solicitud actualizado.'); render();
     } catch (error) { showToast(error.message); }
   }
@@ -933,6 +1011,9 @@ document.addEventListener('drop', event => {
 
 window.addEventListener('hashchange', render);
 window.addEventListener('popstate', render);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.admin.routeActive && Date.now() - state.admin.validatedAt > adminSessionMaxAgeMs) render();
+});
 window.addEventListener('DOMContentLoaded', async () => {
   try {
     const [config, products] = await Promise.all([api('/api/config'), api('/api/catalog')]);
