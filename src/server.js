@@ -154,12 +154,12 @@ function cookieValue(req, name) {
   return '';
 }
 
-function requireAdmin(req) {
+async function requireAdmin(req) {
   const rawToken = cookieValue(req, SESSION_COOKIE);
   if (!rawToken) throw badRequest('Iniciá sesión para continuar.', 401, 'AUTH_REQUIRED');
-  const session = db.prepare('SELECT expires_at FROM admin_sessions WHERE token_hash = ?').get(sha256(rawToken));
+  const session = await db.prepare('SELECT expires_at FROM admin_sessions WHERE token_hash = ?').get(sha256(rawToken));
   if (!session || session.expires_at <= now()) {
-    if (session) db.prepare('DELETE FROM admin_sessions WHERE token_hash = ?').run(sha256(rawToken));
+    if (session) await db.prepare('DELETE FROM admin_sessions WHERE token_hash = ?').run(sha256(rawToken));
     throw badRequest('La sesión venció. Volvé a iniciar sesión.', 401, 'AUTH_REQUIRED');
   }
 }
@@ -185,9 +185,9 @@ function productRecord(row) {
   };
 }
 
-function orderItems(orderId) {
-  return db.prepare(`SELECT product_id, product_slug, product_name, unit_price_cents,
-    quantity, line_total_cents FROM order_items WHERE order_id = ? ORDER BY rowid`).all(orderId).map(item => ({
+async function orderItems(orderId) {
+  return (await db.prepare(`SELECT product_id, product_slug, product_name, unit_price_cents,
+    quantity, line_total_cents FROM order_items WHERE order_id = ? ORDER BY rowid`).all(orderId)).map(item => ({
     productId: item.product_id,
     slug: item.product_slug,
     name: item.product_name,
@@ -197,15 +197,15 @@ function orderItems(orderId) {
   }));
 }
 
-function validTrackingToken(orderId, token) {
+async function validTrackingToken(orderId, token) {
   if (typeof token !== 'string' || token.length < 40 || token.length > 100) return null;
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   if (!order || !sameHash(order.tracking_token_hash, sha256(token))) return null;
   return order;
 }
 
-function publicOrder(order) {
-  const paymentRows = db.prepare(`SELECT method, status, amount_cents, checkout_url, created_at, confirmed_at
+async function publicOrder(order) {
+  const paymentRows = await db.prepare(`SELECT method, status, amount_cents, checkout_url, created_at, confirmed_at
     FROM payments WHERE order_id = ? ORDER BY created_at DESC`).all(order.id);
   return {
     id: order.id,
@@ -224,7 +224,7 @@ function publicOrder(order) {
     carrier: order.carrier,
     shipmentTracking: order.shipment_tracking,
     freightAccepted: Boolean(order.freight_accepted_at),
-    items: orderItems(order.id),
+    items: await orderItems(order.id),
     payments: paymentRows.map(payment => ({
       method: payment.method, status: payment.status, amountCents: payment.amount_cents,
       checkoutUrl: payment.checkout_url || '', createdAt: payment.created_at, confirmedAt: payment.confirmed_at,
@@ -237,11 +237,11 @@ function publicOrder(order) {
   };
 }
 
-function adminOrder(order) {
-  const payments = db.prepare(`SELECT id, method, status, amount_cents, provider_preference_id,
+async function adminOrder(order) {
+  const payments = await db.prepare(`SELECT id, method, status, amount_cents, provider_preference_id,
     provider_payment_id, created_at, confirmed_at FROM payments WHERE order_id = ? ORDER BY created_at DESC`).all(order.id);
   return {
-    ...publicOrder(order),
+    ...await publicOrder(order),
     trackingTokenHash: undefined,
     payments: payments.map(payment => ({
       id: payment.id, method: payment.method, status: payment.status,
@@ -269,29 +269,29 @@ function addProduct(body, id = randomUUID()) {
   return { id, slug: productSlug, name, description, specifications, price, availability, imageUrl, pdfUrl };
 }
 
-function getOrderOr404(id) {
-  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+async function getOrderOr404(id) {
+  const order = await db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
   if (!order) throw badRequest('No encontramos ese pedido.', 404, 'NOT_FOUND');
   return order;
 }
 
-function getQuoteOr404(id) {
-  const quote = db.prepare('SELECT * FROM quotes WHERE id = ?').get(id);
+async function getQuoteOr404(id) {
+  const quote = await db.prepare('SELECT * FROM quotes WHERE id = ?').get(id);
   if (!quote) throw badRequest('No encontramos esa solicitud.', 404, 'NOT_FOUND');
   return quote;
 }
 
-function parseQuoteItems(items) {
+async function parseQuoteItems(items) {
   if (!Array.isArray(items) || items.length < 1 || items.length > 40) {
     throw badRequest('Agregá entre 1 y 40 productos a la consulta.');
   }
-  return items.map(item => {
+  return Promise.all(items.map(async item => {
     const amount = quantity(item.quantity);
     let productName;
     let productId = null;
     let productSlug = '';
     if (item.productId) {
-      const product = db.prepare('SELECT id, slug, name FROM products WHERE id = ? AND active = 1').get(text(item.productId, 'Producto', { max: 80 }));
+      const product = await db.prepare('SELECT id, slug, name FROM products WHERE id = ? AND active = 1').get(text(item.productId, 'Producto', { max: 80 }));
       if (!product) throw badRequest('Uno de los productos elegidos ya no está disponible. Actualizá la página.');
       productName = product.name;
       productId = product.id;
@@ -300,7 +300,7 @@ function parseQuoteItems(items) {
       productName = text(item.productName, 'Producto solicitado', { max: 160 });
     }
     return { productId, slug: productSlug, name: productName, quantity: amount };
-  });
+  }));
 }
 
 function setupHeaders(res) {
@@ -326,12 +326,12 @@ async function api(req, res, url) {
 
   if (method === 'GET' && pathname === '/api/config') return json(res, 200, configPublic());
   if (method === 'GET' && pathname === '/api/catalog') {
-    const rows = db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY name COLLATE NOCASE').all();
+    const rows = (await db.prepare('SELECT * FROM products WHERE active = 1 ORDER BY name COLLATE NOCASE').all());
     return json(res, 200, rows.map(productRecord));
   }
   if (method === 'GET' && pathname.startsWith('/api/products/')) {
     const slugValue = decodeURIComponent(pathname.slice('/api/products/'.length));
-    const product = db.prepare('SELECT * FROM products WHERE slug = ? AND active = 1').get(slugValue);
+    const product = (await db.prepare('SELECT * FROM products WHERE slug = ? AND active = 1').get(slugValue));
     if (!product) return json(res, 404, { error: 'No encontramos ese producto.', code: 'NOT_FOUND' });
     return json(res, 200, productRecord(product));
   }
@@ -357,8 +357,8 @@ async function api(req, res, url) {
     }
     const items = [];
     for (const [productId, amount] of itemMap) {
-      const product = db.prepare(`SELECT id, slug, name, retail_price_cents, availability
-        FROM products WHERE id = ? AND active = 1`).get(productId);
+      const product = (await db.prepare(`SELECT id, slug, name, retail_price_cents, availability
+        FROM products WHERE id = ? AND active = 1`).get(productId));
       if (!product || product.availability !== 'available') throw badRequest('Un producto del carrito ya no se puede comprar. Actualizá el catálogo.');
       if (amount > 9999) throw badRequest('La cantidad de un producto supera el máximo permitido.');
       items.push({ ...product, quantity: amount, lineTotalCents: product.retail_price_cents * amount });
@@ -368,12 +368,12 @@ async function api(req, res, url) {
     const id = randomBytes(12).toString('hex');
     const token = randomBytes(32).toString('base64url');
     const timestamp = now();
-    transaction(() => {
-      db.prepare(`INSERT INTO orders (id, tracking_token_hash, customer_name, email, phone, address, province,
+    await transaction(async () => {
+      (await db.prepare(`INSERT INTO orders (id, tracking_token_hash, customer_name, email, phone, address, province,
         locality, postal_code, notes, subtotal_cents, freight_cents, total_cents, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'received', ?, ?)`)
         .run(id, sha256(token), customer.name, customer.email, customer.phone, customer.address,
-          customer.province, customer.locality, customer.postalCode, customer.notes, subtotal, subtotal, timestamp, timestamp);
+          customer.province, customer.locality, customer.postalCode, customer.notes, subtotal, subtotal, timestamp, timestamp));
       const insertItem = db.prepare(`INSERT INTO order_items (id, order_id, product_id, product_slug, product_name,
         unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
       for (const item of items) insertItem.run(randomUUID(), id, item.id, item.slug, item.name,
@@ -396,84 +396,90 @@ async function api(req, res, url) {
     if (!company && !contact) throw badRequest('Indicá la razón social o el nombre de contacto.');
     const phone = text(body.phone, 'Teléfono', { max: 80 });
     const destination = text(body.destination, 'Destino', { max: 240 });
-    const items = parseQuoteItems(body.items);
+    const items = await parseQuoteItems(body.items);
     const id = randomBytes(8).toString('hex').toUpperCase();
     const timestamp = now();
-    db.prepare(`INSERT INTO quotes (id, company_name, contact_name, cuit, email, phone, destination,
+    (await db.prepare(`INSERT INTO quotes (id, company_name, contact_name, cuit, email, phone, destination,
       items_json, notes, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
       .run(id, company, contact, text(body.cuit || '', 'CUIT', { required: false, max: 16 }), email(body.email), phone,
-        destination, JSON.stringify(items), text(body.notes || '', 'Observaciones', { required: false, max: 1200 }), timestamp, timestamp);
+        destination, JSON.stringify(items), text(body.notes || '', 'Observaciones', { required: false, max: 1200 }), timestamp, timestamp));
     return json(res, 201, { id, createdAt: timestamp, message: 'Tu solicitud quedó registrada. DAYBREAKER te responderá por email o WhatsApp.' });
   }
 
   if (method === 'POST' && pathname === '/api/track') {
     const body = await readBody(req);
-    const order = validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
+    const order = await validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
     if (!order) throw badRequest('El enlace de seguimiento no es válido. Usá el enlace completo que recibiste.', 404, 'TRACKING_NOT_FOUND');
-    return json(res, 200, publicOrder(order));
+    return json(res, 200, await publicOrder(order));
   }
 
   if (method === 'POST' && pathname === '/api/track/accept-freight') {
     const body = await readBody(req);
-    const order = validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
+    const order = await validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
     if (!order) throw badRequest('El enlace de seguimiento no es válido.', 404, 'TRACKING_NOT_FOUND');
     if (order.status !== 'freight_quoted' || order.freight_cents === null) throw badRequest('Todavía no hay un flete listo para aceptar.');
-    transaction(() => {
+    await transaction(async () => {
       const acceptedAt = now();
-      db.prepare(`UPDATE orders SET status = 'awaiting_payment', freight_accepted_at = ?, updated_at = ? WHERE id = ?`)
-        .run(acceptedAt, acceptedAt, order.id);
+      (await db.prepare(`UPDATE orders SET status = 'awaiting_payment', freight_accepted_at = ?, updated_at = ? WHERE id = ? AND status = 'freight_quoted' AND freight_cents IS NOT NULL`)
+        .run(acceptedAt, acceptedAt, order.id));
       logOrderEvent(order.id, 'freight_accepted', { totalCents: order.total_cents });
     });
-    return json(res, 200, { message: 'Total aceptado. Ya podés elegir un medio de pago.', order: publicOrder(getOrderOr404(order.id)) });
+    const acceptedOrder = await getOrderOr404(order.id);
+    if (acceptedOrder.status !== 'awaiting_payment' || !acceptedOrder.freight_accepted_at) throw badRequest('El pedido cambi? mientras aceptabas el flete. Actualiz? el seguimiento.', 409, 'ORDER_STATE_CHANGED');
+    return json(res, 200, { message: 'Total aceptado. Ya podés elegir un medio de pago.', order: await publicOrder(acceptedOrder) });
   }
 
   if (method === 'POST' && pathname === '/api/track/payment') {
     const body = await readBody(req);
-    const order = validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
+    const order = await validTrackingToken(text(body.id, 'Código de pedido', { max: 32 }), body.token);
     if (!order) throw badRequest('El enlace de seguimiento no es válido.', 404, 'TRACKING_NOT_FOUND');
     if (order.status !== 'awaiting_payment' || !order.freight_accepted_at || order.freight_cents === null) {
       throw badRequest('Primero aceptá el total con flete cotizado.');
     }
     const methodName = text(body.method, 'Medio de pago', { max: 24 });
     if (!['transfer', 'mercadopago'].includes(methodName)) throw badRequest('Elegí un medio de pago disponible.');
-    const existing = db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`)
-      .get(order.id, methodName);
+    const existing = (await db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(order.id, methodName));
     if (existing && existing.status !== 'failed') {
       return json(res, 200, {
         payment: { id: existing.id, method: existing.method, status: existing.status, amountCents: existing.amount_cents },
         checkoutUrl: existing.checkout_url || '',
         bankDetails: methodName === 'transfer' ? bankDetails() : null,
-        order: publicOrder(order),
+        order: await publicOrder(order),
       });
     }
     const paymentId = randomUUID();
     const timestamp = now();
     if (methodName === 'transfer') {
       if (!configPublic().transferEnabled) throw badRequest('La cuenta bancaria de DAYBREAKER todavía no está configurada.', 503, 'PAYMENT_NOT_CONFIGURED');
-      db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, created_at)
-        VALUES (?, ?, 'transfer', ?, 'pending_verification', ?)`)
-        .run(paymentId, order.id, order.total_cents, timestamp);
-      logOrderEvent(order.id, 'transfer_instructions_shown', { amountCents: order.total_cents });
+      await transaction(async () => {
+        (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, created_at)
+          VALUES (?, ?, 'transfer', ?, 'pending_verification', ?)`)
+          .run(paymentId, order.id, order.total_cents, timestamp));
+        logOrderEvent(order.id, 'transfer_instructions_shown', { amountCents: order.total_cents });
+      });
       return json(res, 201, {
         payment: { id: paymentId, method: methodName, status: 'pending_verification', amountCents: order.total_cents },
         bankDetails: bankDetails(),
-        order: publicOrder(getOrderOr404(order.id)),
+        order: await publicOrder(await getOrderOr404(order.id)),
       });
     }
 
     if (!configPublic().mercadopagoEnabled) throw badRequest('Mercado Pago todavía no está configurado para la cuenta de DAYBREAKER.', 503, 'PAYMENT_NOT_CONFIGURED');
-    const items = db.prepare(`SELECT product_slug, product_name, unit_price_cents, quantity
-      FROM order_items WHERE order_id = ? ORDER BY rowid`).all(order.id);
+    const items = (await db.prepare(`SELECT product_slug, product_name, unit_price_cents, quantity
+      FROM order_items WHERE order_id = ? ORDER BY rowid`).all(order.id));
     const preference = await createPreference(order, items);
-    db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, provider_preference_id,
-      checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', ?, ?, ?)`)
-      .run(paymentId, order.id, order.total_cents, preference.id, preference.url, timestamp);
-    logOrderEvent(order.id, 'mercadopago_checkout_created', { amountCents: order.total_cents });
+    await transaction(async () => {
+      (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, provider_preference_id,
+        checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', ?, ?, ?)`)
+        .run(paymentId, order.id, order.total_cents, preference.id, preference.url, timestamp));
+      logOrderEvent(order.id, 'mercadopago_checkout_created', { amountCents: order.total_cents });
+    });
     return json(res, 201, {
       payment: { id: paymentId, method: methodName, status: 'pending', amountCents: order.total_cents },
       checkoutUrl: preference.url,
-      order: publicOrder(getOrderOr404(order.id)),
+      order: await publicOrder(await getOrderOr404(order.id)),
     });
   }
 
@@ -497,43 +503,43 @@ async function api(req, res, url) {
     loginAttempts.delete(ip);
     const token = randomBytes(32).toString('base64url');
     const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    db.prepare('DELETE FROM admin_sessions WHERE expires_at <= ?').run(now());
-    db.prepare('INSERT INTO admin_sessions (token_hash, expires_at, created_at) VALUES (?, ?, ?)').run(sha256(token), expires, now());
+    (await db.prepare('DELETE FROM admin_sessions WHERE expires_at <= ?').run(now()));
+    (await db.prepare('INSERT INTO admin_sessions (token_hash, expires_at, created_at) VALUES (?, ?, ?)').run(sha256(token), expires, now()));
     return json(res, 200, { authenticated: true }, {
       'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SESSION_DAYS * 24 * 60 * 60}${process.env.NODE_ENV === 'production' ? '; Secure' : ''}`,
     });
   }
 
   if (method === 'GET' && pathname === '/api/admin/session') {
-    try { requireAdmin(req); return json(res, 200, { authenticated: true }); }
+    try { await requireAdmin(req); return json(res, 200, { authenticated: true }); }
     catch { return json(res, 200, { authenticated: false }); }
   }
   if (method === 'POST' && pathname === '/api/admin/logout') {
     const token = cookieValue(req, SESSION_COOKIE);
-    if (token) db.prepare('DELETE FROM admin_sessions WHERE token_hash = ?').run(sha256(token));
+    if (token) (await db.prepare('DELETE FROM admin_sessions WHERE token_hash = ?').run(sha256(token)));
     return json(res, 200, { authenticated: false }, { 'Set-Cookie': cookieOptions(req, 0) });
   }
 
-  if (pathname.startsWith('/api/admin/')) requireAdmin(req);
+  if (pathname.startsWith('/api/admin/')) await requireAdmin(req);
 
   if (method === 'GET' && pathname === '/api/admin/products') {
-    return json(res, 200, db.prepare('SELECT * FROM products ORDER BY active DESC, name COLLATE NOCASE').all().map(productRecord));
+    return json(res, 200, (await db.prepare('SELECT * FROM products ORDER BY active DESC, name COLLATE NOCASE').all()).map(productRecord));
   }
   if (method === 'POST' && pathname === '/api/admin/products') {
     const body = await readBody(req);
     const product = addProduct(body);
     const timestamp = now();
-    db.prepare(`INSERT INTO products (id, slug, name, short_description, specifications, retail_price_cents,
+    (await db.prepare(`INSERT INTO products (id, slug, name, short_description, specifications, retail_price_cents,
       availability, image_url, technical_pdf_url, active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`)
       .run(product.id, product.slug, product.name, product.description, product.specifications, product.price,
-        product.availability, product.imageUrl || null, product.pdfUrl || null, timestamp, timestamp);
-    return json(res, 201, productRecord(db.prepare('SELECT * FROM products WHERE id = ?').get(product.id)));
+        product.availability, product.imageUrl || null, product.pdfUrl || null, timestamp, timestamp));
+    return json(res, 201, productRecord((await db.prepare('SELECT * FROM products WHERE id = ?').get(product.id))));
   }
   const productRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)$/i);
   if (productRoute && method === 'PUT') {
     const body = await readBody(req);
-    const current = db.prepare('SELECT image_url, technical_pdf_url FROM products WHERE id = ?').get(productRoute[1]);
+    const current = (await db.prepare('SELECT image_url, technical_pdf_url FROM products WHERE id = ?').get(productRoute[1]));
     if (!current) throw badRequest('No encontramos ese producto.', 404, 'NOT_FOUND');
     const product = addProduct({
       ...body,
@@ -541,31 +547,31 @@ async function api(req, res, url) {
       technicalPdfUrl: body.technicalPdfUrl ?? current.technical_pdf_url ?? '',
     }, productRoute[1]);
     const timestamp = now();
-    const result = db.prepare(`UPDATE products SET slug = ?, name = ?, short_description = ?, specifications = ?,
+    const result = (await db.prepare(`UPDATE products SET slug = ?, name = ?, short_description = ?, specifications = ?,
       retail_price_cents = ?, availability = ?, image_url = ?, technical_pdf_url = ?, active = ?, updated_at = ? WHERE id = ?`)
       .run(product.slug, product.name, product.description, product.specifications, product.price, product.availability,
-        product.imageUrl || null, product.pdfUrl || null, body.active === false ? 0 : 1, timestamp, product.id);
+        product.imageUrl || null, product.pdfUrl || null, body.active === false ? 0 : 1, timestamp, product.id));
     if (!result.changes) throw badRequest('No encontramos ese producto.', 404, 'NOT_FOUND');
-    return json(res, 200, productRecord(db.prepare('SELECT * FROM products WHERE id = ?').get(product.id)));
+    return json(res, 200, productRecord((await db.prepare('SELECT * FROM products WHERE id = ?').get(product.id))));
   }
   if (productRoute && method === 'DELETE') {
-    const result = db.prepare('UPDATE products SET active = 0, updated_at = ? WHERE id = ?').run(now(), productRoute[1]);
+    const result = (await db.prepare('UPDATE products SET active = 0, updated_at = ? WHERE id = ?').run(now(), productRoute[1]));
     if (!result.changes) throw badRequest('No encontramos ese producto.', 404, 'NOT_FOUND');
     return json(res, 200, { archived: true });
   }
 
   if (method === 'GET' && pathname === '/api/admin/orders') {
-    const rows = db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 500').all();
-    return json(res, 200, rows.map(adminOrder));
+    const rows = (await db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 500').all());
+    return json(res, 200, await Promise.all(rows.map(adminOrder)));
   }
   const freightRoute = pathname.match(/^\/api\/admin\/orders\/([a-f0-9]+)\/freight$/i);
   if (freightRoute && method === 'PUT') {
     const body = await readBody(req);
-    const order = getOrderOr404(freightRoute[1]);
+    const order = await getOrderOr404(freightRoute[1]);
     if (['canceled', 'delivered', 'preparing', 'dispatched', 'payment_confirmed'].includes(order.status)) {
       throw badRequest('No se puede modificar el flete en el estado actual del pedido.');
     }
-    const hasPayments = db.prepare(`SELECT 1 FROM payments WHERE order_id = ? AND status <> 'failed' LIMIT 1`).get(order.id);
+    const hasPayments = (await db.prepare(`SELECT 1 FROM payments WHERE order_id = ? AND status <> 'failed' LIMIT 1`).get(order.id));
     if (hasPayments) throw badRequest('El pedido ya tiene un intento de pago. Contactá al cliente antes de cambiar el total.');
     const freight = parseMoneyCents(body.freight, 'Flete');
     const total = order.subtotal_cents + freight;
@@ -573,19 +579,22 @@ async function api(req, res, url) {
     const carrier = text(body.carrier || '', 'Transportista', { required: false, max: 120 });
     const shipmentTracking = text(body.shipmentTracking || '', 'Seguimiento', { required: false, max: 180 });
     const timestamp = now();
-    transaction(() => {
-      db.prepare(`UPDATE orders SET freight_cents = ?, total_cents = ?, status = 'freight_quoted',
-        freight_accepted_at = NULL, carrier = ?, shipment_tracking = ?, updated_at = ? WHERE id = ?`)
-        .run(freight, total, carrier, shipmentTracking, timestamp, order.id);
+    await transaction(async () => {
+      (await db.prepare(`UPDATE orders SET freight_cents = ?, total_cents = ?, status = 'freight_quoted',
+        freight_accepted_at = NULL, carrier = ?, shipment_tracking = ?, updated_at = ? WHERE id = ? AND status = ?
+        AND NOT EXISTS (SELECT 1 FROM payments WHERE order_id = ? AND status <> 'failed')`)
+        .run(freight, total, carrier, shipmentTracking, timestamp, order.id, order.status, order.id));
       logOrderEvent(order.id, 'freight_quoted', { freightCents: freight, totalCents: total, carrier });
     });
-    return json(res, 200, adminOrder(getOrderOr404(order.id)));
+    const quotedOrder = await getOrderOr404(order.id);
+    if (quotedOrder.status !== 'freight_quoted' || quotedOrder.freight_cents !== freight) throw badRequest('El pedido cambi? mientras actualizabas el flete. Volv? a cargarlo.', 409, 'ORDER_STATE_CHANGED');
+    return json(res, 200, await adminOrder(quotedOrder));
   }
 
   const orderStatusRoute = pathname.match(/^\/api\/admin\/orders\/([a-f0-9]+)\/status$/i);
   if (orderStatusRoute && method === 'PUT') {
     const body = await readBody(req);
-    const order = getOrderOr404(orderStatusRoute[1]);
+    const order = await getOrderOr404(orderStatusRoute[1]);
     const status = text(body.status, 'Estado', { max: 40 });
     if (!ORDER_STATUSES.includes(status)) throw badRequest('Seleccioná un estado válido.');
     if (['payment_confirmed', 'received', 'freight_quoted', 'awaiting_payment'].includes(status)) {
@@ -603,21 +612,23 @@ async function api(req, res, url) {
       throw badRequest('Ese cambio de estado no está permitido desde el estado actual.');
     }
     if (status === 'canceled') {
-      const activePayment = db.prepare(`SELECT 1 FROM payments WHERE order_id = ? AND status <> 'failed' LIMIT 1`).get(order.id);
+      const activePayment = (await db.prepare(`SELECT 1 FROM payments WHERE order_id = ? AND status <> 'failed' LIMIT 1`).get(order.id));
       if (activePayment || ['payment_confirmed', 'preparing', 'dispatched', 'delivered'].includes(order.status)) {
         throw badRequest('El pedido tiene un pago iniciado o confirmado. Resolvé ese pago antes de cancelarlo.');
       }
     }
     const timestamp = now();
-    transaction(() => {
-      db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ?').run(status, timestamp, order.id);
+    await transaction(async () => {
+      (await db.prepare('UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?').run(status, timestamp, order.id, order.status));
       logOrderEvent(order.id, status, { source: 'admin' });
     });
-    return json(res, 200, adminOrder(getOrderOr404(order.id)));
+    const updatedOrder = await getOrderOr404(order.id);
+    if (updatedOrder.status !== status) throw badRequest('El pedido cambiÃ³ antes de guardar el estado. VolvÃ© a cargarlo.', 409, 'ORDER_STATE_CHANGED');
+    return json(res, 200, await adminOrder(updatedOrder));
   }
 
   if (method === 'GET' && pathname === '/api/admin/quotes') {
-    const rows = db.prepare('SELECT * FROM quotes ORDER BY created_at DESC LIMIT 500').all();
+    const rows = (await db.prepare('SELECT * FROM quotes ORDER BY created_at DESC LIMIT 500').all());
     return json(res, 200, rows.map(quote => ({
       id: quote.id, companyName: quote.company_name, contactName: quote.contact_name,
       cuit: quote.cuit, email: quote.email, phone: quote.phone, destination: quote.destination,
@@ -628,29 +639,37 @@ async function api(req, res, url) {
   const quoteRoute = pathname.match(/^\/api\/admin\/quotes\/([A-F0-9]+)\/status$/i);
   if (quoteRoute && method === 'PUT') {
     const body = await readBody(req);
-    const quote = getQuoteOr404(quoteRoute[1]);
+    const quote = await getQuoteOr404(quoteRoute[1]);
     const status = text(body.status, 'Estado', { max: 24 });
     if (!QUOTE_STATUSES.includes(status)) throw badRequest('Seleccioná un estado válido.');
-    db.prepare('UPDATE quotes SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), quote.id);
+    (await db.prepare('UPDATE quotes SET status = ?, updated_at = ? WHERE id = ?').run(status, now(), quote.id));
     return json(res, 200, { id: quote.id, status });
   }
 
   const paymentConfirmRoute = pathname.match(/^\/api\/admin\/payments\/([a-f0-9-]+)\/confirm$/i);
   if (paymentConfirmRoute && method === 'PUT') {
-    const payment = db.prepare(`SELECT p.*, o.status AS order_status FROM payments p
-      JOIN orders o ON o.id = p.order_id WHERE p.id = ?`).get(paymentConfirmRoute[1]);
+    const payment = (await db.prepare(`SELECT p.*, o.status AS order_status FROM payments p
+      JOIN orders o ON o.id = p.order_id WHERE p.id = ?`).get(paymentConfirmRoute[1]));
     if (!payment) throw badRequest('No encontramos ese pago.', 404, 'NOT_FOUND');
+    if (payment.method === 'transfer' && payment.status === 'confirmed') {
+      return json(res, 200, { confirmed: true, alreadyConfirmed: true });
+    }
     if (payment.method !== 'transfer' || payment.status !== 'pending_verification') {
       throw badRequest('Solo se puede confirmar manualmente una transferencia pendiente de verificar.');
     }
     if (payment.order_status === 'canceled') throw badRequest('No se puede confirmar el pago de un pedido cancelado.');
     const timestamp = now();
-    transaction(() => {
-      db.prepare(`UPDATE payments SET status = 'confirmed', confirmed_at = ? WHERE id = ?`).run(timestamp, payment.id);
-      db.prepare(`UPDATE orders SET status = 'payment_confirmed', updated_at = ? WHERE id = ? AND status = 'awaiting_payment'`)
-        .run(timestamp, payment.order_id);
+    await transaction(async () => {
+      (await db.prepare(`UPDATE payments SET status = 'confirmed', confirmed_at = ? WHERE id = ? AND status = 'pending_verification'
+        AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'awaiting_payment' AND freight_accepted_at IS NOT NULL)`)
+        .run(timestamp, payment.id, payment.order_id));
+      (await db.prepare(`UPDATE orders SET status = 'payment_confirmed', updated_at = ? WHERE id = ? AND status = 'awaiting_payment'
+        AND EXISTS (SELECT 1 FROM payments WHERE id = ? AND status = 'confirmed')`)
+        .run(timestamp, payment.order_id, payment.id));
       logOrderEvent(payment.order_id, 'payment_confirmed', { method: 'transfer', amountCents: payment.amount_cents });
     });
+    const confirmedOrder = await getOrderOr404(payment.order_id);
+    if (confirmedOrder.status !== 'payment_confirmed') throw badRequest('El pedido cambi? y el pago no se pudo confirmar. Revis? el estado antes de reintentar.', 409, 'PAYMENT_STATE_CHANGED');
     return json(res, 200, { confirmed: true });
   }
 
@@ -688,10 +707,10 @@ async function handleMercadoPagoWebhook(req, res, url) {
     return json(res, 503, { error: 'No se pudo verificar el pago con Mercado Pago.' });
   }
   if (remote.currency_id !== 'ARS' || !remote.external_reference) return json(res, 200, { received: true });
-  const payment = db.prepare(`SELECT p.*, o.total_cents, o.status AS order_status
+  const payment = (await db.prepare(`SELECT p.*, o.total_cents, o.status AS order_status
     FROM payments p JOIN orders o ON o.id = p.order_id
     WHERE p.provider_preference_id = ? AND p.order_id = ? AND p.method = 'mercadopago'`)
-    .get(String(remote.preference_id || ''), String(remote.external_reference));
+    .get(String(remote.preference_id || ''), String(remote.external_reference)));
   if (!payment) return json(res, 200, { received: true });
   if (payment.status === 'confirmed') return json(res, 200, { received: true });
   const remoteCents = providerAmountCents(remote.transaction_amount);
@@ -701,21 +720,23 @@ async function handleMercadoPagoWebhook(req, res, url) {
   }
   if (remote.status === 'approved' && payment.order_status !== 'canceled') {
     const timestamp = now();
-    transaction(() => {
-      db.prepare(`UPDATE payments SET status = 'confirmed', provider_payment_id = ?, confirmed_at = ? WHERE id = ?`)
-        .run(String(remote.id), timestamp, payment.id);
-      db.prepare(`UPDATE orders SET status = 'payment_confirmed', updated_at = ? WHERE id = ? AND freight_accepted_at IS NOT NULL AND freight_cents IS NOT NULL AND status IN ('awaiting_payment','freight_quoted')`)
-        .run(timestamp, payment.order_id);
+    await transaction(async () => {
+      (await db.prepare(`UPDATE payments SET status = 'confirmed', provider_payment_id = ?, confirmed_at = ? WHERE id = ? AND status = 'pending'
+        AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND freight_accepted_at IS NOT NULL AND freight_cents IS NOT NULL AND status IN ('awaiting_payment','freight_quoted'))`)
+        .run(String(remote.id), timestamp, payment.id, payment.order_id));
+      (await db.prepare(`UPDATE orders SET status = 'payment_confirmed', updated_at = ? WHERE id = ? AND freight_accepted_at IS NOT NULL AND freight_cents IS NOT NULL AND status IN ('awaiting_payment','freight_quoted')
+        AND EXISTS (SELECT 1 FROM payments WHERE id = ? AND status = 'confirmed')`)
+        .run(timestamp, payment.order_id, payment.id));
       logOrderEvent(payment.order_id, 'payment_confirmed', { method: 'mercadopago', amountCents: remoteCents });
     });
   } else if (['rejected', 'cancelled'].includes(remote.status)) {
-    db.prepare(`UPDATE payments SET status = 'failed', provider_payment_id = ? WHERE id = ?`)
-      .run(String(remote.id), payment.id);
+    (await db.prepare(`UPDATE payments SET status = 'failed', provider_payment_id = ? WHERE id = ?`)
+      .run(String(remote.id), payment.id));
   }
   return json(res, 200, { received: true });
 }
 
-function serveIndex(req, res, pathname) {
+async function serveIndex(req, res, pathname) {
   let html = readFileSync(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
   if (pathname.startsWith('/seguimiento/') || pathname.startsWith('/pago/')) {
     const title = pathname.startsWith('/seguimiento/') ? 'Seguimiento privado | DAYBREAKER SAS' : 'Estado de pago | DAYBREAKER SAS';
@@ -743,7 +764,7 @@ function serveIndex(req, res, pathname) {
   }
   const match = pathname.match(/^\/productos\/([a-z0-9-]+)$/i);
   if (match) {
-    const product = db.prepare('SELECT name, short_description, slug FROM products WHERE slug = ? AND active = 1').get(match[1]);
+    const product = (await db.prepare('SELECT name, short_description, slug FROM products WHERE slug = ? AND active = 1').get(match[1]));
     if (!product) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
       return res.end(html.replace('<title>DAYBREAKER SAS | Comercial</title>', '<title>Producto no encontrado | DAYBREAKER SAS</title>'));
@@ -793,7 +814,7 @@ export async function handleRequest(req, res) {
     }
     if (url.pathname === '/sitemap.xml') {
       const base = escapeHtml(publicBaseUrl(req));
-      const products = db.prepare('SELECT slug, updated_at FROM products WHERE active = 1 ORDER BY slug').all();
+      const products = (await db.prepare('SELECT slug, updated_at FROM products WHERE active = 1 ORDER BY slug').all());
       const pages = ['/', '/quienes-somos', '/catalogo', '/presupuestos-mayoristas', '/carrito', '/contacto'];
       const urls = [...pages.map(path => `<url><loc>${base}${path === '/' ? '/' : path}</loc></url>`), ...products.map(product =>
         `<url><loc>${base}/productos/${encodeURIComponent(product.slug)}</loc><lastmod>${product.updated_at.slice(0, 10)}</lastmod></url>`),
@@ -802,7 +823,7 @@ export async function handleRequest(req, res) {
       return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${urls.join('')}</urlset>`);
     }
     if (['/', '/index.html', '/quienes-somos', '/catalogo', '/presupuestos-mayoristas', '/carrito', '/contacto'].includes(url.pathname) || /^\/(productos|seguimiento|pago)(\/|$)/.test(url.pathname)) {
-      return serveIndex(req, res, url.pathname);
+      return await serveIndex(req, res, url.pathname);
     }
     return staticFile(res, url.pathname);
   } catch (error) {

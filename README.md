@@ -14,9 +14,45 @@ No hace falta instalar paquetes npm. La base SQLite se crea en `data/daybreaker.
 
 El repositorio incluye `vercel.json` y una función Node.js para publicar la web. Importá el repositorio `Daybreaker_SaaS_Pagina_Web` en Vercel; usá Node.js 24 y dejá vacíos el comando de compilación y el directorio de salida.
 
-La publicación queda en modo de solo lectura: Vercel ejecuta funciones con sistema de archivos efímero y la base SQLite local no sirve para guardar pedidos de forma persistente. La vista pública puede recorrerse, pero los cambios y formularios que guardan datos responden con un aviso hasta conectar una base persistente. No habilites operaciones reales ni pagos en esta vista previa.
+Vercel ejecuta la aplicación y persiste los datos en Cloudflare D1 a través del Worker incluido en `cloudflare/worker.js`. El backend envía identificadores de consultas permitidas y parámetros enlazados; el Worker no acepta SQL arbitrario. Vercel nunca usa SQLite ni `/tmp` como alternativa. El backend de Vercel se niega a iniciar si faltan `D1_PROXY_URL`, `D1_PROXY_SECRET` o `D1_PROXY_VERIFIED=true`.
 
-Para habilitar operaciones en producción, primero hay que conectar una base de datos persistente y adaptar el acceso de datos; luego se configuran en Vercel `ADMIN_PASSWORD`, `PUBLIC_BASE_URL`, los datos comerciales autorizados y, si corresponde, las credenciales de Mercado Pago. La documentación de Vercel describe el sistema de archivos de sus funciones como de solo lectura, con `/tmp` temporal, y ofrece bases de datos mediante integraciones de Marketplace.
+## Cloudflare D1
+
+La migración inicial está en `migrations/0001_initial.sql` y conserva las siete tablas, claves, restricciones e índices de SQLite. La revisión local encontró cero registros y `PRAGMA integrity_check` devolvió `ok`; por eso no se requiere importar filas existentes y no se sobrescribieron datos. La migración remota debe ejecutarse sólo después de verificar que `daybreaker-sas-dev` es la base correcta.
+
+Para desarrollo del Worker, instalá Wrangler en tu entorno y creá `.dev.vars` a partir de `.dev.vars.example` con un secreto aleatorio privado:
+
+```powershell
+Copy-Item .dev.vars.example .dev.vars
+npx wrangler d1 migrations apply daybreaker-sas-dev --local
+npx wrangler dev
+```
+
+La aplicación Node local sigue usando SQLite por defecto. Para probar la aplicación local contra un Worker local, configurá `D1_PROXY_URL=http://127.0.0.1:8787` y el mismo `D1_PROXY_SECRET` en `.env`; quitá esas variables para volver a SQLite.
+
+Antes de migrar, inspeccioná la base remota. Si aparecen tablas de la aplicación o datos que no esperabas, detenete y no apliques la migración:
+
+```powershell
+npx wrangler d1 execute daybreaker-sas-dev --remote --command "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+npx wrangler d1 migrations list daybreaker-sas-dev --remote
+```
+
+Después de autenticar Wrangler con tu cuenta Cloudflare y confirmar que no hay tablas/datos que deban conservarse, aplicá la migración y desplegá el Worker:
+
+```powershell
+npx wrangler d1 migrations apply daybreaker-sas-dev --remote
+npx wrangler deploy
+npx wrangler secret put D1_API_SECRET
+```
+
+El Worker publicado rechaza toda llamada mientras no tenga el secreto. `wrangler secret put` solicita el valor de forma interactiva y publica la configuración sin tener que pegar el secreto en este repositorio ni en el chat. Generá el mismo secreto de alta entropía localmente para usarlo en Vercel. Poné temporalmente `D1_PROXY_URL` y `D1_PROXY_SECRET` en tu `.env` local y ejecutá `npm.cmd run verify:d1`; el comando sólo envía una comprobación autenticada `SELECT 1`. En el proyecto de Vercel, agregá como variables de entorno para Production (y Preview si corresponde):
+
+- `D1_PROXY_URL`: URL HTTPS del Worker desplegado.
+- `D1_PROXY_SECRET`: el secreto compartido, cargado directamente en el panel de Vercel.
+- `D1_PROXY_VERIFIED`: el texto `true`, sólo después de que `npm.cmd run verify:d1` haya pasado.
+- Conservá `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` y las demás variables comerciales ya aprobadas.
+
+No actives tráfico de producción hasta que el Worker esté desplegado, la migración remota figure aplicada, la verificación de conexión sea correcta y se haya redeplegado Vercel con las tres variables. No se configuran cobros reales durante esta migración.
 
 ## Flujos incluidos
 
