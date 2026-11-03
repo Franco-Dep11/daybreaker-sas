@@ -834,14 +834,25 @@ export async function handleRequest(req, res) {
 export default async function vercelHandler(req, res) {
   const protocol = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
   const requestUrl = new URL(req.url || '/', `${protocol}://${req.headers.host || 'localhost'}`);
-  const requestedPath = requestUrl.searchParams.get('__path');
+  const urlPaths = requestUrl.searchParams.getAll('__path');
+  const platformPaths = req.query?.__path;
+  const platformPathList = Array.isArray(platformPaths) ? platformPaths : [platformPaths];
+  const requestedPath = [...urlPaths].reverse().find(isInternalRequestPath)
+    || [...platformPathList].reverse().find(isInternalRequestPath);
 
-  if (requestedPath?.startsWith('/')) {
+  if (requestedPath) {
     requestUrl.searchParams.delete('__path');
     req.url = `${requestedPath}${requestUrl.search}`;
   }
 
   return handleRequest(req, res);
+}
+
+function isInternalRequestPath(value) {
+  return typeof value === 'string'
+    && value.startsWith('/')
+    && !value.startsWith('//')
+    && !/[\\?#\u0000-\u001f]/.test(value);
 }
 
 const isMainModule = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

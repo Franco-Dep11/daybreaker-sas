@@ -12,10 +12,22 @@
     },
     {
       "source": "/api/:path*",
+      "missing": [
+        {
+          "type": "query",
+          "key": "__path"
+        }
+      ],
       "destination": "/api/index?__path=/api/:path*"
     },
     {
       "source": "/:path*",
+      "missing": [
+        {
+          "type": "query",
+          "key": "__path"
+        }
+      ],
       "destination": "/api/index?__path=/:path*"
     }
   ]
