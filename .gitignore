@@ -4,6 +4,7 @@
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/*.sqlite-journal
 backups/
 node_modules/
 .vercel/
