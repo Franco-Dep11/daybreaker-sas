@@ -59,6 +59,19 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   assert.equal(product.name, 'Producto editado');
   assert.equal((await api('/api/catalog')).data.length, 1);
 
+  const hidden = await api(`/api/admin/products/${product.id}/visibility`, { method: 'PATCH', auth: true, body: { visibleInStore: false } });
+  assert.equal(hidden.response.status, 200);
+  assert.deepEqual(hidden.data, { id: product.id, visibleInStore: false });
+  assert.equal((await api('/api/catalog')).data.length, 0);
+  const hiddenAdminProduct = (await api('/api/admin/products', { auth: true })).data.find(item => item.id === product.id);
+  assert.equal(hiddenAdminProduct.visibleInStore, false);
+  assert.equal(hiddenAdminProduct.active, true);
+  assert.equal(hiddenAdminProduct.retailPriceCents, product.retailPriceCents);
+  const shown = await api(`/api/admin/products/${product.id}/visibility`, { method: 'PATCH', auth: true, body: { visibleInStore: true } });
+  assert.equal(shown.response.status, 200);
+  assert.equal((await api('/api/catalog')).data.length, 1);
+  assert.equal((await api('/api/admin/products', { auth: true })).data.find(item => item.id === product.id).visibleInStore, true);
+
   const quote = await api('/api/quotes', { method: 'POST', body: {
     companyName: 'Comercio de prueba', email: 'test@example.com', phone: '1122334455', destination: 'Buenos Aires',
     items: [{ productId: product.id, quantity: 4 }],

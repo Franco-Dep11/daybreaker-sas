@@ -264,6 +264,10 @@ button { cursor: pointer; }
 .admin-shell .admin-login .eyebrow { color: var(--accent-dark); }
 .admin-shell .admin-login-title { color: var(--ink); }
 .admin-shell .admin-login .form-intro { color: #59635f; }
+.admin-shell .admin-login .button-outline { color: var(--ink); border-color: #68736c; }
+.admin-shell .admin-login .button-outline:hover { color: #fff; background: #2b332f; border-color: #2b332f; }
+.admin-shell .admin-login .button-outline:focus-visible { color: var(--ink); background: #fff; border-color: var(--accent-dark); outline: 3px solid var(--accent-dark); outline-offset: 3px; }
+.admin-shell .admin-login .button-outline:disabled, .admin-shell .admin-login .button-outline[aria-disabled="true"] { color: #59635f; background: #f0f1ed; border-color: #aeb5b1; cursor: not-allowed; opacity: 1; transform: none; }
 .admin-shell .admin-top h1, .admin-shell .admin-toolbar h2, .admin-shell .admin-form-heading h2 { color: #f4f5f3; }
 .admin-shell .admin-top p, .admin-shell .admin-form-heading p, .admin-shell .eyebrow { color: #a7b0ab; }
 .admin-shell .admin-tabs { background: #1a201e; border: 1px solid #2b3330; }

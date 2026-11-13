@@ -185,6 +185,16 @@ test('Vercel permite login y CRUD administrativo cuando D1 está verificada', as
     name: 'Producto en preview', slug: 'producto-preview', retailPrice: '4500', availability: 'available',
   } });
   assert.equal(created.response.status, 201);
+  const hidden = await rewrittenApi(`/api/admin/products/${created.data.id}/visibility`, { method: 'PATCH', auth: true, body: { visibleInStore: false } });
+  assert.deepEqual(hidden.data, { id: created.data.id, visibleInStore: false });
+  assert.deepEqual({ ...sqlDb.prepare('SELECT visible_in_store, retail_price_cents FROM products WHERE id = ?').get(created.data.id) }, { visible_in_store: 0, retail_price_cents: 450000 });
+  const hiddenAdminProduct = (await rewrittenApi('/api/admin/products', { auth: true })).data.find(item => item.id === created.data.id);
+  assert.equal(hiddenAdminProduct.active, true);
+  assert.equal(hiddenAdminProduct.visibleInStore, false);
+  assert.equal((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id), false);
+  const shown = await rewrittenApi(`/api/admin/products/${created.data.id}/visibility`, { method: 'PATCH', auth: true, body: { visibleInStore: true } });
+  assert.equal(shown.data.visibleInStore, true);
+  assert.equal((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id), true);
   assert.ok((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id));
   const imageNotConfigured = await rewrittenApi(`/api/admin/products/${created.data.id}/images`, { method: 'POST', auth: true, contentType: 'image/png', rawBody: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]) });
   assert.equal(imageNotConfigured.response.status, 503);

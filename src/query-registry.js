@@ -70,6 +70,7 @@ export const QUERIES = Object.freeze({
   q069: "SELECT id FROM categories WHERE name = ?",
   q070: "SELECT id FROM subcategories WHERE category_id = ? AND name = ?",
   q071: "SELECT position FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position",
+  q072: "UPDATE products SET visible_in_store = ? WHERE id = ? AND active = 1",
 });
 const IDS = new Map(Object.entries(QUERIES).map(([id, sql]) => [normalize(sql), id]));
 function normalize(sql) { return String(sql).replace(/\s+/g, ' ').trim(); }

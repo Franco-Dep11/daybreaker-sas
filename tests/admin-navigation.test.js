@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('../public/app.js', import.meta.url), 'utf8');
+const styles = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8');
 const section = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 
 test('admin shell renders without waiting for administrative API data', () => {
@@ -34,4 +35,14 @@ test('private admin data remains behind the server-validated session gate', () =
 test('admin login submits both the configured username and password', () => {
   assert.match(source, /name="username" type="text" autocomplete="username"/);
   assert.match(source, /body: \{ username: data\.get\('username'\), password: data\.get\('password'\) \}/);
+});
+
+test('visibility toggle uses the dedicated endpoint and login return button keeps contrast in every state', () => {
+  const action = section("if (action === 'toggle-visibility')", "if (action === 'set-primary-image'");
+  assert.match(action, /\/visibility`[^\n]*method: 'PATCH'/);
+  assert.doesNotMatch(action, /retailPrice|method: 'PUT'/);
+  assert.match(styles, /\.admin-shell \.admin-login \.button-outline \{ color: var\(--ink\)/);
+  assert.match(styles, /\.admin-shell \.admin-login \.button-outline:hover/);
+  assert.match(styles, /\.admin-shell \.admin-login \.button-outline:focus-visible/);
+  assert.match(styles, /\.admin-shell \.admin-login \.button-outline:disabled/);
 });

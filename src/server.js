@@ -591,6 +591,15 @@ async function api(req, res, url) {
       LEFT JOIN categories c ON c.id = p.category_id LEFT JOIN subcategories s ON s.id = p.subcategory_id
       ORDER BY p.active DESC, p.name COLLATE NOCASE`).all()));
   }
+  const productVisibilityRoute = pathname.match(/^\/api\/admin\/products\/([a-f0-9-]+)\/visibility$/i);
+  if (productVisibilityRoute && method === 'PATCH') {
+    const body = await readBody(req);
+    if (typeof body.visibleInStore !== 'boolean') throw badRequest('Indicá si el producto debe mostrarse en la tienda.');
+    const result = await db.prepare('UPDATE products SET visible_in_store = ? WHERE id = ? AND active = 1')
+      .run(body.visibleInStore ? 1 : 0, productVisibilityRoute[1]);
+    if (!result.changes) throw badRequest('No encontramos ese producto activo.', 404, 'NOT_FOUND');
+    return json(res, 200, { id: productVisibilityRoute[1], visibleInStore: body.visibleInStore });
+  }
   if (method === 'POST' && pathname === '/api/admin/products') {
     const body = await readBody(req);
     const product = addProduct(body);

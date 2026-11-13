@@ -754,7 +754,14 @@ async function handleAction(button) {
   if (action === 'toggle-visibility') {
     const product = state.admin.products.find(item => item.id === button.dataset.productId); if (!product) return;
     button.disabled = true;
-    try { const saved = await api(`/api/admin/products/${product.id}`, { method: 'PUT', body: { ...product, retailPrice: (product.retailPriceCents / 100).toFixed(2), visibleInStore: !product.visibleInStore } }); Object.assign(product, saved); state.products = state.products.filter(item => item.id !== product.id); if (product.active && product.visibleInStore) state.products.push(product); showToast(product.visibleInStore ? 'Producto visible.' : 'Producto oculto.'); render(); } catch (error) { button.disabled = false; showToast(error.message); }
+    try {
+      const result = await api(`/api/admin/products/${encodeURIComponent(product.id)}/visibility`, { method: 'PATCH', body: { visibleInStore: !product.visibleInStore } });
+      product.visibleInStore = result.visibleInStore;
+      state.products = state.products.filter(item => item.id !== product.id);
+      if (product.active && product.visibleInStore) state.products.push(product);
+      state.products.sort((left, right) => left.name.localeCompare(right.name, 'es'));
+      showToast(product.visibleInStore ? 'Producto visible.' : 'Producto oculto.'); render();
+    } catch (error) { button.disabled = false; showToast(error.message); }
     return;
   }
   if (action === 'set-primary-image' || action === 'remove-product-image') {
