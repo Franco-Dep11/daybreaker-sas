@@ -5,7 +5,7 @@ Maqueta funcional de una plataforma comercial con catálogo minorista, pedidos c
 ## Requisitos y puesta en marcha
 
 - Node.js 22.13 o superior.
-- En PowerShell, copiá `.env.example` como `.env` y completá `ADMIN_PASSWORD` con una clave única de al menos 16 caracteres.
+- En PowerShell, copiá `.env.example` como `.env` y configurá `ADMIN_USER` (por defecto, `admin`) y `ADMIN_PASSWORD` con una clave única de al menos 16 caracteres.
 - Ejecutá `npm.cmd start` y abrí `http://localhost:3000`.
 
 No hace falta instalar paquetes npm. La base SQLite se crea en `data/daybreaker.sqlite` al iniciar. El catálogo empieza vacío para evitar inventar productos o precios.
@@ -50,7 +50,7 @@ El Worker publicado rechaza toda llamada mientras no tenga el secreto. `wrangler
 - `D1_PROXY_URL`: URL HTTPS del Worker desplegado.
 - `D1_PROXY_SECRET`: el secreto compartido, cargado directamente en el panel de Vercel.
 - `D1_PROXY_VERIFIED`: el texto `true`, sólo después de que `npm.cmd run verify:d1` haya pasado.
-- Conservá `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` y las demás variables comerciales ya aprobadas.
+- Conservá `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` y las demás variables comerciales ya aprobadas. `ADMIN_USER` es opcional y por defecto vale `admin`; si lo configurás, usá el mismo valor en Preview y Production.
 
 No actives tráfico de producción hasta que el Worker esté desplegado, la migración remota figure aplicada, la verificación de conexión sea correcta y se haya redeplegado Vercel con las tres variables. No se configuran cobros reales durante esta migración.
 

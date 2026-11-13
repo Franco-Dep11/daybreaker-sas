@@ -6,7 +6,7 @@
   --paper: #f5f4f0;
   --white: #fff;
   --line: #dedfd9;
-  --accent: #ee6a43;
+  --accent: #ff8059;
   --accent-dark: #c94d2b;
   --mint: #c9d8cf;
   --good: #287050;
@@ -49,8 +49,8 @@ button { cursor: pointer; }
 .button:hover { transform: translateY(-1px); }
 .button-dark { color: #fff; background: var(--ink); }
 .button-dark:hover { background: #2b3b3b; }
-.button-accent { color: #fff; background: var(--accent); }
-.button-accent:hover { background: var(--accent-dark); }
+.button-accent { color: var(--ink); background: var(--accent); }
+.button-accent:hover { background: #ff9877; }
 .button-outline { color: var(--ink); border-color: #aeb5b1; background: transparent; }
 .button-outline:hover { border-color: var(--ink); background: #fff; }
 .button-small { min-height: 36px; padding: 0 12px; font-size: 12px; }
@@ -258,6 +258,12 @@ button { cursor: pointer; }
 .admin-payment-label { font-size: 11px; }
 .admin-summary { margin-bottom: 20px; border: 1px solid var(--line); }
 .admin-shell { color: #eef0ee; background: #111514; }
+.admin-shell .button-outline { color: #eef0ee; border-color: #68736c; }
+.admin-shell .button-outline:hover { color: #fff; background: #2b332f; border-color: #9ba59f; }
+.admin-shell .admin-login { color: var(--ink); background: #fff; }
+.admin-shell .admin-login .eyebrow { color: var(--accent-dark); }
+.admin-shell .admin-login-title { color: var(--ink); }
+.admin-shell .admin-login .form-intro { color: #59635f; }
 .admin-shell .admin-top h1, .admin-shell .admin-toolbar h2, .admin-shell .admin-form-heading h2 { color: #f4f5f3; }
 .admin-shell .admin-top p, .admin-shell .admin-form-heading p, .admin-shell .eyebrow { color: #a7b0ab; }
 .admin-shell .admin-tabs { background: #1a201e; border: 1px solid #2b3330; }

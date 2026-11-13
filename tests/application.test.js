@@ -9,6 +9,7 @@ for (const suffix of ['', '-shm', '-wal']) rmSync(`${databasePath}${suffix}`, { 
 process.env.DATABASE_PATH = databasePath;
 process.env.NODE_ENV = 'test';
 process.env.ADMIN_PASSWORD = 'local-development-password-32chars';
+process.env.ADMIN_USER = 'daybreaker-test';
 process.env.BANK_ACCOUNT_HOLDER = 'DAYBREAKER TEST';
 process.env.BANK_NAME = 'Banco de prueba';
 process.env.BANK_CBU = '0000000000000000000000';
@@ -39,7 +40,9 @@ after(async () => {
 });
 
 test('productos, pedido, cotización, sesión, flete, seguimiento y confirmación son persistentes', async () => {
-  const login = await api('/api/admin/login', { method: 'POST', body: { password: process.env.ADMIN_PASSWORD } });
+  const invalidLogin = await api('/api/admin/login', { method: 'POST', body: { username: 'usuario-incorrecto', password: process.env.ADMIN_PASSWORD } });
+  assert.equal(invalidLogin.response.status, 401);
+  const login = await api('/api/admin/login', { method: 'POST', body: { username: process.env.ADMIN_USER, password: process.env.ADMIN_PASSWORD } });
   assert.equal(login.response.status, 200);
   assert.ok(cookie.startsWith('daybreaker_session='));
 
@@ -103,4 +106,15 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   assert.equal(finalOrder.data.payments[0].status, 'confirmed');
   assert.equal((await api('/api/admin/logout', { method: 'POST' })).response.status, 200);
   assert.equal((await api('/api/admin/session')).data.authenticated, false);
+});
+
+test('ADMIN_USER es opcional y usa admin por defecto', async () => {
+  const configuredUser = process.env.ADMIN_USER;
+  delete process.env.ADMIN_USER;
+  try {
+    const login = await api('/api/admin/login', { method: 'POST', body: { username: 'admin', password: process.env.ADMIN_PASSWORD } });
+    assert.equal(login.response.status, 200);
+  } finally {
+    process.env.ADMIN_USER = configuredUser;
+  }
 });

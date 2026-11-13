@@ -522,15 +522,17 @@ async function api(req, res, url) {
     if (attempts.until > Date.now() && attempts.count >= 8) throw badRequest('Demasiados intentos. Esperá 15 minutos y volvé a intentar.', 429, 'LOGIN_THROTTLED');
     if (attempts.until <= Date.now()) loginAttempts.set(ip, { count: 0, until: Date.now() + LOGIN_WINDOW_MS });
     const body = await readBody(req);
+    const username = text(body.username, 'Usuario', { max: 100 });
     const candidate = text(body.password, 'Contraseña', { max: 256 });
     const salt = Buffer.from('daybreaker-admin-login-v1', 'utf8');
     const expected = scryptSync(process.env.ADMIN_PASSWORD, salt, 32);
     const received = scryptSync(candidate, salt, 32);
-    if (!timingSafeEqual(expected, received)) {
+    const usernameMatches = username === (process.env.ADMIN_USER || 'admin');
+    if (!usernameMatches || !timingSafeEqual(expected, received)) {
       const current = loginAttempts.get(ip) || { count: 0, until: Date.now() + LOGIN_WINDOW_MS };
       current.count += 1;
       loginAttempts.set(ip, current);
-      throw badRequest('La contraseña no es correcta.', 401, 'INVALID_CREDENTIALS');
+      throw badRequest('El usuario o la contraseña no son correctos.', 401, 'INVALID_CREDENTIALS');
     }
     loginAttempts.delete(ip);
     const token = randomBytes(32).toString('base64url');

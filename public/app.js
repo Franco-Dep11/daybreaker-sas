@@ -573,7 +573,7 @@ function adminPage() {
     return `<section class="admin-shell"><div class="section-shell"><div class="panel-card admin-login" role="status" aria-live="polite"><span class="eyebrow">Panel interno</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Verificando el acceso…</p><span class="loading-shell"><span class="loading-spinner"></span><span>Un momento</span></span></div></div></section>`;
   }
   if (state.admin.authStatus !== 'authenticated') {
-    return `<section class="admin-shell"><div class="section-shell"><form id="admin-login-form" class="panel-card admin-login"><span class="eyebrow">Acceso restringido</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Ingresá la contraseña interna configurada para esta instalación.</p><div class="field"><label for="admin-password">Contraseña</label><input id="admin-password" name="password" type="password" autocomplete="current-password" minlength="16" required></div><div id="admin-login-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-dark" type="submit">Iniciar sesión</button><a class="button button-outline" href="/">Volver</a></div></form></div></section>`;
+    return `<section class="admin-shell"><div class="section-shell"><form id="admin-login-form" class="panel-card admin-login"><span class="eyebrow">Acceso restringido</span><h1 class="admin-login-title">Panel DAYBREAKER</h1><p class="form-intro">Ingresá tu usuario y contraseña internos.</p><div class="field"><label for="admin-username">Usuario</label><input id="admin-username" name="username" type="text" autocomplete="username" maxlength="100" required></div><div class="field"><label for="admin-password">Contraseña</label><input id="admin-password" name="password" type="password" autocomplete="current-password" minlength="16" required></div><div id="admin-login-error" class="form-error" role="alert" hidden></div><div class="form-actions"><button class="button button-dark" type="submit">Iniciar sesión</button><a class="button button-outline" href="/">Volver</a></div></form></div></section>`;
   }
   const content = renderAdminContent();
   const pendingOrders = state.admin.loaded.orders ? state.admin.orders.filter(order => !['delivered','canceled'].includes(order.status)).length : '—';
@@ -807,7 +807,7 @@ async function handleSubmit(form) {
     const errorBox = document.querySelector('#admin-login-error');
     errorBox.hidden = true;
     try {
-      await api('/api/admin/login', { method: 'POST', body: { password: data.get('password') } });
+      await api('/api/admin/login', { method: 'POST', body: { username: data.get('username'), password: data.get('password') } });
       state.admin.authenticated = true; state.admin.authStatus = 'authenticated'; state.admin.validatedAt = Date.now(); showToast('Sesión iniciada.'); render();
     } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
     return;

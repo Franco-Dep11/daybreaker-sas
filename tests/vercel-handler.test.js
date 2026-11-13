@@ -11,6 +11,7 @@ process.env.D1_PROXY_URL = 'https://d1-proxy.test';
 process.env.D1_PROXY_SECRET = 'vercel-test-shared-secret-'.padEnd(40, 'v');
 process.env.D1_PROXY_VERIFIED = 'true';
 process.env.ADMIN_PASSWORD = 'vercel-test-admin-password';
+process.env.ADMIN_USER = 'vercel-admin';
 process.env.NODE_ENV = 'production';
 
 const sqlDb = new DatabaseSync(':memory:');
@@ -176,7 +177,7 @@ test('handler lee __path desde req.query si Vercel no lo incluye en req.url', as
 });
 
 test('Vercel permite login y CRUD administrativo cuando D1 está verificada', async () => {
-  const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { password: process.env.ADMIN_PASSWORD } });
+  const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { username: process.env.ADMIN_USER, password: process.env.ADMIN_PASSWORD } });
   assert.equal(login.response.status, 200);
   assert.ok(cookie.startsWith('daybreaker_session='));
 
@@ -209,7 +210,7 @@ test('0002 conserva productos existentes y D1 administra categorias, stock y vis
   assert.deepEqual({ ...legacyProduct }, { availability: 'available', stock_quantity: 0, category_id: null, visible_in_store: 1 });
   assert.equal(sqlDb.prepare('SELECT COUNT(*) AS count FROM orders WHERE id = ?').get('legacy-order').count, 1);
   assert.equal(sqlDb.prepare('SELECT product_name, unit_price_cents FROM order_items WHERE id = ?').get('legacy-order-item').product_name, 'Legacy preservado');
-  const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { password: process.env.ADMIN_PASSWORD } });
+  const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { username: process.env.ADMIN_USER, password: process.env.ADMIN_PASSWORD } });
   assert.equal(login.response.status, 200);
   const legacyAdminProduct = (await rewrittenApi('/api/admin/products', { auth: true })).data.find(item => item.id === 'legacy-product');
   assert.equal(legacyAdminProduct.availability, 'available');

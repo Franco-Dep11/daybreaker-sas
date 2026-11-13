@@ -30,3 +30,8 @@ test('private admin data remains behind the server-validated session gate', () =
   assert.match(source, /function clearAdminPrivateData\(\)[\s\S]*authStatus: 'unauthenticated'[\s\S]*orders: \[\][\s\S]*products: \[\]/);
   assert.match(source, /response\.status === 401[\s\S]*clearAdminPrivateData\(\)/);
 });
+
+test('admin login submits both the configured username and password', () => {
+  assert.match(source, /name="username" type="text" autocomplete="username"/);
+  assert.match(source, /body: \{ username: data\.get\('username'\), password: data\.get\('password'\) \}/);
+});
