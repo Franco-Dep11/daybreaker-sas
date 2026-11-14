@@ -1,7 +1,11 @@
 const app = document.querySelector('#app');
 const toastBox = document.querySelector('#toast');
 const cartStorageKey = 'daybreaker-cart-v1';
+const analyticsConsentKey = 'daybreaker-analytics-consent-v1';
 const adminSessionMaxAgeMs = 60_000;
+let analyticsTagLoaded = false;
+let lastAnalyticsPage = '';
+let lastSeoRoute = `${window.location.pathname}${window.location.hash}`;
 const argentineProvinces = [
   'Buenos Aires', 'Catamarca', 'Chaco', 'Chubut', 'Ciudad Autónoma de Buenos Aires',
   'Córdoba', 'Corrientes', 'Entre Ríos', 'Formosa', 'Jujuy', 'La Pampa', 'La Rioja',
@@ -26,7 +30,7 @@ const statusText = {
 };
 
 const state = {
-  config: { contactEmail: '', whatsappPhone: '', transferEnabled: false, mercadopagoEnabled: false, adminEnabled: false, readOnlyPreview: false },
+  config: { contactEmail: '', whatsappPhone: '', transferEnabled: false, mercadopagoEnabled: false, adminEnabled: false, readOnlyPreview: false, analyticsMeasurementId: '', noindexDeployment: false },
   products: [],
   cart: loadCart(),
   quoteDraft: [],
@@ -40,6 +44,201 @@ function loadCart() {
     const value = JSON.parse(localStorage.getItem(cartStorageKey) || '{}');
     return value && typeof value === 'object' ? value : {};
   } catch { return {}; }
+}
+
+function validAnalyticsConsent() {
+  return analyticsConsentChoice() === 'granted';
+}
+
+function analyticsConsentChoice() {
+  try { return localStorage.getItem(analyticsConsentKey) || ''; } catch { return ''; }
+}
+
+function setAnalyticsConsent(value) {
+  try { localStorage.setItem(analyticsConsentKey, value); } catch {}
+  const measurementId = state.config.analyticsMeasurementId;
+  if (!measurementId) return;
+  window[`ga-disable-${measurementId}`] = value !== 'granted';
+  if (window.gtag) window.gtag('consent', 'update', {
+    analytics_storage: value === 'granted' ? 'granted' : 'denied',
+    ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied',
+  });
+  if (value === 'granted') loadAnalyticsTag();
+}
+
+function loadAnalyticsTag() {
+  const measurementId = state.config.analyticsMeasurementId;
+  if (!measurementId || !validAnalyticsConsent()) return;
+  window[`ga-disable-${measurementId}`] = false;
+  if (!analyticsTagLoaded) {
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = function gtag() { window.dataLayer.push(arguments); };
+    window.gtag('consent', 'default', {
+      analytics_storage: 'denied', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied',
+    });
+    const script = document.createElement('script');
+    script.async = true;
+    script.src = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(measurementId)}`;
+    document.head.append(script);
+    window.gtag('js', new Date());
+    window.gtag('config', measurementId, { send_page_view: false, allow_google_signals: false, allow_ad_personalization_signals: false });
+    analyticsTagLoaded = true;
+  }
+  window.gtag('consent', 'update', {
+    analytics_storage: 'granted', ad_storage: 'denied', ad_user_data: 'denied', ad_personalization: 'denied',
+  });
+}
+
+function analyticsEvent(name, parameters = {}) {
+  if (!state.config.analyticsMeasurementId || !validAnalyticsConsent() || !window.gtag) return;
+  const pathname = window.location.pathname;
+  const privatePath = pathname.startsWith('/seguimiento') || pathname.startsWith('/pago')
+    || ((pathname === '/' || pathname === '/index.html') && window.location.hash === '#admin');
+  const safePath = privatePath ? '/' : pathname;
+  window.gtag('event', name, {
+    page_location: `${window.location.origin}${safePath}`,
+    page_path: safePath,
+    page_title: privatePath ? 'DAYBREAKER S.A.S.' : document.title,
+    ...parameters,
+  });
+}
+
+function analyticsItem(product, quantity = 1) {
+  return { item_id: product.id, item_name: product.name, price: product.retailPriceCents / 100, quantity };
+}
+
+function trackAnalyticsPage() {
+  if (!state.config.analyticsMeasurementId || !validAnalyticsConsent() || !window.gtag) return;
+  const pathname = window.location.pathname;
+  if (pathname.startsWith('/seguimiento/') || pathname === '/seguimiento' || pathname.startsWith('/pago/') || pathname === '/pago'
+    || ((pathname === '/' || pathname === '/index.html') && window.location.hash === '#admin')) { lastAnalyticsPage = ''; return; }
+  if (pathname === lastAnalyticsPage) return;
+  const pageLocation = `${window.location.origin}${pathname}`;
+  const pageReferrer = lastAnalyticsPage ? `${window.location.origin}${lastAnalyticsPage}` : (() => {
+    try { return document.referrer ? new URL(document.referrer).origin : ''; } catch { return ''; }
+  })();
+  window.gtag('event', 'page_view', { page_title: document.title, page_location: pageLocation, page_path: pathname, page_referrer: pageReferrer });
+  lastAnalyticsPage = pathname;
+  if (pathname.startsWith('/productos/')) {
+    const slug = pathname.slice('/productos/'.length);
+    const product = state.products.find(item => item.slug === slug);
+    if (product) analyticsEvent('view_item', { currency: 'ARS', value: product.retailPriceCents / 100, items: [analyticsItem(product)] });
+  }
+}
+
+function trackConfirmedPurchase(order) {
+  if (order.status !== 'payment_confirmed' || !Number.isFinite(order.subtotalCents) || !order.items?.length) return;
+  const storageKey = `daybreaker-ga-purchase-${order.id}`;
+  try { if (sessionStorage.getItem(storageKey)) return; } catch {}
+  analyticsEvent('purchase', {
+    transaction_id: order.id,
+    value: order.subtotalCents / 100,
+    shipping: Number.isFinite(order.freightCents) ? order.freightCents / 100 : 0,
+    currency: 'ARS',
+    items: order.items.map(item => ({ item_id: item.productId || item.slug, item_name: item.name, price: item.unitPriceCents / 100, quantity: item.quantity })),
+  });
+  if (validAnalyticsConsent()) {
+    try { sessionStorage.setItem(storageKey, 'sent'); } catch {}
+  }
+}
+
+function setupAnalyticsConsent() {
+  const preferences = document.querySelector('[data-action="analytics-preferences"]');
+  const measurementId = state.config.analyticsMeasurementId;
+  if (!preferences || !measurementId) {
+    if (preferences) preferences.hidden = true;
+    return;
+  }
+  preferences.hidden = false;
+  let banner = document.querySelector('#analytics-consent');
+  if (!banner) {
+    banner = document.createElement('section');
+    banner.id = 'analytics-consent';
+    banner.className = 'analytics-consent';
+    banner.setAttribute('role', 'dialog');
+    banner.setAttribute('aria-labelledby', 'analytics-consent-title');
+    banner.setAttribute('aria-describedby', 'analytics-consent-description');
+    banner.hidden = true;
+    banner.innerHTML = '<div><strong id="analytics-consent-title">Preferencias de analítica</strong><p id="analytics-consent-description">Si aceptás, DAYBREAKER usará Google Analytics para medir el uso del sitio. No se enviarán datos personales de pedidos, formularios ni seguimiento.</p></div><div class="analytics-consent-actions"><button class="button button-accent button-small" type="button" data-action="analytics-consent" data-choice="granted">Aceptar analítica</button><button class="button button-outline button-small" type="button" data-action="analytics-consent" data-choice="denied">Rechazar</button></div>';
+    document.body.append(banner);
+  }
+  banner.hidden = Boolean(analyticsConsentChoice());
+}
+
+function updateClientSeo() {
+  const pathname = window.location.pathname;
+  const routeKey = `${pathname}${window.location.hash === '#admin' ? '#admin' : ''}`;
+  const changedRoute = routeKey !== lastSeoRoute;
+  if (changedRoute) document.querySelector('#seo-jsonld')?.remove();
+  lastSeoRoute = routeKey;
+  const adminRoute = (pathname === '/' || pathname === '/index.html') && window.location.hash === '#admin';
+  if (pathname.startsWith('/seguimiento') || pathname.startsWith('/pago') || pathname === '/carrito' || adminRoute) {
+    const title = pathname.startsWith('/seguimiento') ? 'Seguimiento privado | DAYBREAKER S.A.S.' : pathname.startsWith('/pago') ? 'Estado de pago | DAYBREAKER S.A.S.' : adminRoute ? 'Panel DAYBREAKER | Acceso administrativo' : 'Carrito y seguimiento | DAYBREAKER S.A.S.';
+    document.title = title;
+    let robots = document.querySelector('meta[name="robots"]');
+    if (!robots) { robots = document.createElement('meta'); robots.name = 'robots'; document.head.append(robots); }
+    robots.content = 'noindex,nofollow';
+    document.querySelector('link[rel="canonical"]')?.remove();
+    return;
+  }
+  const product = pathname.startsWith('/productos/') ? state.products.find(item => item.slug === pathname.slice('/productos/'.length)) : null;
+  const pages = {
+    '/': ['DAYBREAKER S.A.S. | Catálogo y presupuestos mayoristas', 'Catálogo de productos de DAYBREAKER S.A.S. con precios minoristas en pesos argentinos y atención para consultas mayoristas.'],
+    '/index.html': ['DAYBREAKER S.A.S. | Catálogo y presupuestos mayoristas', 'Catálogo de productos de DAYBREAKER S.A.S. con precios minoristas en pesos argentinos y atención para consultas mayoristas.'],
+    '/quienes-somos': ['Quiénes somos | DAYBREAKER S.A.S.', 'Conocé DAYBREAKER S.A.S., su catálogo minorista y su canal de atención para consultas mayoristas.'],
+    '/catalogo': ['Catálogo de productos | DAYBREAKER S.A.S.', 'Consultá productos, precios minoristas en pesos argentinos y disponibilidad en el catálogo de DAYBREAKER S.A.S.'],
+    '/presupuestos-mayoristas': ['Presupuestos mayoristas | DAYBREAKER S.A.S.', 'Solicitá un presupuesto mayorista de DAYBREAKER S.A.S. indicando productos, cantidades y destino.'],
+    '/carrito': ['Carrito y seguimiento | DAYBREAKER S.A.S.', 'Armá tu pedido minorista y consultá su estado mediante el enlace privado de seguimiento.'],
+    '/contacto': ['Contacto | DAYBREAKER S.A.S.', 'Contactá a DAYBREAKER S.A.S. por consultas comerciales, compras minoristas y presupuestos mayoristas.'],
+  };
+  const titleAndDescription = product
+    ? [`${product.name} | DAYBREAKER S.A.S.`, product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`]
+    : pages[pathname];
+  if (!titleAndDescription) return;
+  const [title, description] = titleAndDescription;
+  document.title = title;
+  let descriptionTag = document.querySelector('meta[name="description"]');
+  if (!descriptionTag) { descriptionTag = document.createElement('meta'); descriptionTag.name = 'description'; document.head.append(descriptionTag); }
+  descriptionTag.content = description;
+  const noindex = state.config.noindexDeployment;
+  let robots = document.querySelector('meta[name="robots"]');
+  if (noindex) {
+    if (!robots) { robots = document.createElement('meta'); robots.name = 'robots'; document.head.append(robots); }
+    robots.content = 'noindex,nofollow';
+    document.querySelector('link[rel="canonical"]')?.remove();
+    return;
+  }
+  robots?.remove();
+  let canonical = document.querySelector('link[rel="canonical"]');
+  if (!canonical) { canonical = document.createElement('link'); canonical.rel = 'canonical'; document.head.append(canonical); }
+  canonical.href = `${window.location.origin}${product ? `/productos/${encodeURIComponent(product.slug)}` : pathname === '/index.html' ? '/' : pathname}`;
+  const setMeta = (selector, attribute, value) => {
+    let element = document.querySelector(selector);
+    if (!element) { element = document.createElement('meta'); element.setAttribute(attribute, value); document.head.append(element); }
+    element.content = value;
+  };
+  setMeta('meta[property="og:title"]', 'property', 'og:title');
+  setMeta('meta[property="og:type"]', 'property', 'og:type');
+  setMeta('meta[property="og:description"]', 'property', 'og:description');
+  setMeta('meta[property="og:url"]', 'property', 'og:url');
+  document.querySelector('meta[property="og:title"]').content = title;
+  document.querySelector('meta[property="og:type"]').content = product ? 'product' : 'website';
+  document.querySelector('meta[property="og:description"]').content = description;
+  document.querySelector('meta[property="og:url"]').content = canonical.href;
+  setMeta('meta[name="twitter:title"]', 'name', 'twitter:title');
+  setMeta('meta[name="twitter:description"]', 'name', 'twitter:description');
+  setMeta('meta[name="twitter:card"]', 'name', 'twitter:card');
+  document.querySelector('meta[name="twitter:title"]').content = title;
+  document.querySelector('meta[name="twitter:description"]').content = description;
+  const imageUrl = product?.imageUrl || product?.images?.find(image => image.isPrimary)?.url || '';
+  document.querySelector('meta[name="twitter:card"]').content = imageUrl ? 'summary_large_image' : 'summary';
+  for (const selector of ['meta[property="og:image"]', 'meta[name="twitter:image"]']) document.querySelector(selector)?.remove();
+  if (imageUrl) {
+    setMeta('meta[property="og:image"]', 'property', 'og:image');
+    setMeta('meta[name="twitter:image"]', 'name', 'twitter:image');
+    document.querySelector('meta[property="og:image"]').content = new URL(imageUrl, window.location.origin).href;
+    document.querySelector('meta[name="twitter:image"]').content = new URL(imageUrl, window.location.origin).href;
+  }
 }
 
 function saveCart() {
@@ -144,6 +343,7 @@ function heroPage() {
       <div class="feature-cell"><strong>Flete informado antes del pago</strong><span>Confirmás el total una vez que DAYBREAKER cotiza el transporte.</span></div>
       <div class="feature-cell"><strong>Atención mayorista</strong><span>Enviá productos y cantidades; la respuesta es personalizada.</span></div>
     </div>
+    ${state.products.length ? `<section class="section section-compact home-products"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Catálogo minorista</span><h2>Productos disponibles</h2><p>Consultá las fichas, precios y disponibilidad del catálogo.</p></div><div class="product-grid">${state.products.slice(0, 6).map(productCard).join('')}</div><p><a class="button button-outline" href="/catalogo">Ver catálogo completo</a></p></div></section>` : ''}
     <section class="section">
       <div class="section-shell split-layout">
         <div>
@@ -195,7 +395,7 @@ function availabilityBadge(value) {
 
 function productCard(product) {
   const image = product.imageUrl
-    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}" loading="lazy">`
+    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}" width="640" height="640" loading="lazy" decoding="async">`
     : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
   const canBuy = product.availability === 'available';
   return `<article class="product-card">
@@ -227,16 +427,16 @@ function catalogPage() {
 
 function productPageMarkup(product) {
   const image = product.imageUrl
-    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}">`
+    ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}" width="800" height="800" fetchpriority="high">`
     : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
   const canBuy = product.availability === 'available';
-  const gallery = (product.images || []).length > 1 ? `<div class="product-gallery">${product.images.map(image => `<img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText || product.name)}" loading="lazy">`).join('')}</div>` : '';
+  const gallery = (product.images || []).length > 1 ? `<div class="product-gallery">${product.images.map(image => `<img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText || product.name)}" width="320" height="320" loading="lazy" decoding="async">`).join('')}</div>` : '';
   return shell(`<section class="section"><div class="section-shell">
     <p class="kicker"><a href="/catalogo">Catálogo</a> / Ficha de producto</p>
     <div class="split-layout product-detail-layout">
       <div><div class="product-image product-detail-image">${image}${availabilityBadge(product.availability)}</div>${gallery}</div>
       <div><span class="eyebrow">Ficha de producto</span><h1 class="product-title">${escapeHtml(product.name)}</h1>
-        ${availabilityBadge(product.availability)}<p class="product-description">${escapeHtml(product.shortDescription || 'La descripción comercial se completará con los datos aprobados por DAYBREAKER.')}</p>
+        ${availabilityBadge(product.availability)}<p class="product-description">${escapeHtml(product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`)}</p>
         <span class="product-price-label">Precio minorista</span><strong class="product-price product-price-detail">${money(product.retailPriceCents)}</strong>
         ${product.specifications ? `<div class="panel-card specification-panel"><h2>Especificaciones</h2><p>${escapeHtml(product.specifications)}</p></div>` : ''}
         <p class="product-shipping-note">El transporte se cotiza según domicilio, volumen y cantidad. El pago queda habilitado después de aceptar el total final.</p>
@@ -391,6 +591,7 @@ async function trackingPage() {
   if (token && orderId) {
     try {
       const order = await api('/api/track', { method: 'POST', body: { id: orderId, token } });
+      trackConfirmedPurchase(order);
       details = trackingResult(order, token);
     } catch (error) {
       details = `<div class="notice" role="alert">${escapeHtml(error.message)}</div>`;
@@ -639,6 +840,8 @@ async function render() {
     const content = await routePage();
     if (version !== state.routeVersion) return;
     app.innerHTML = content;
+    updateClientSeo();
+    trackAnalyticsPage();
     app.setAttribute('aria-busy', 'false');
     if (isAdminRoute) ensureAdminRouteData();
     if (window.location.pathname === '/presupuestos-mayoristas' && state.quoteDraft.length) {
@@ -664,11 +867,24 @@ function quoteDraftFor(product) {
 
 async function handleAction(button) {
   const action = button.dataset.action;
+  if (action === 'analytics-preferences') {
+    const banner = document.querySelector('#analytics-consent');
+    if (banner) { banner.hidden = false; banner.querySelector('[data-choice="granted"]')?.focus(); }
+    return;
+  }
+  if (action === 'analytics-consent') {
+    setAnalyticsConsent(button.dataset.choice === 'granted' ? 'granted' : 'denied');
+    const banner = document.querySelector('#analytics-consent');
+    if (banner) banner.hidden = true;
+    if (button.dataset.choice === 'granted') render();
+    return;
+  }
   if (action === 'admin') return setRoute('admin');
   if (action === 'add-cart') {
     const product = state.products.find(item => item.id === button.dataset.productId);
     if (!product || product.availability !== 'available') return showToast('Este producto no está disponible para compra.');
     state.cart[product.id] = (Number(state.cart[product.id]) || 0) + 1;
+    analyticsEvent('add_to_cart', { currency: 'ARS', value: product.retailPriceCents / 100, items: [analyticsItem(product)] });
     saveCart(); showToast(`${product.name} se agregó al carrito.`);
     if (window.location.pathname === '/carrito') render();
     return;
@@ -846,6 +1062,7 @@ async function handleSubmit(form) {
         phone: data.get('phone'), email: data.get('email'), destination: data.get('destination'),
         items: rows, notes: data.get('notes'),
       } });
+      analyticsEvent('generate_lead');
       document.querySelector('#quote-result').innerHTML = `<div class="form-success">Solicitud <strong>${escapeHtml(result.id)}</strong> registrada el ${dateTime(result.createdAt)}. DAYBREAKER te responderá por email o WhatsApp.</div>`;
       form.reset(); state.quoteDraft = [{ productId: state.products.length ? '' : 'custom', productName: '', quantity: 1 }];
     } catch (error) { errorBox.textContent = error.message; errorBox.hidden = false; }
@@ -855,6 +1072,11 @@ async function handleSubmit(form) {
     const errorBox = document.querySelector('#checkout-error');
     errorBox.hidden = true;
     const items = Object.entries(state.cart).filter(([, amount]) => Number(amount) > 0).map(([productId, amount]) => ({ productId, quantity: Number(amount) }));
+    const checkoutValue = items.reduce((sum, item) => sum + (state.products.find(product => product.id === item.productId)?.retailPriceCents || 0) * item.quantity, 0) / 100;
+    analyticsEvent('begin_checkout', { currency: 'ARS', value: checkoutValue, items: items.flatMap(item => {
+      const product = state.products.find(candidate => candidate.id === item.productId);
+      return product ? [analyticsItem(product, item.quantity)] : [];
+    }) });
     try {
       const checkout = {
         customerName: data.get('customerName'), email: data.get('email'), phone: data.get('phone'),
@@ -1053,6 +1275,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     const [config, products] = await Promise.all([api('/api/config'), api('/api/catalog')]);
     state.config = config;
     state.products = products;
+    setupAnalyticsConsent();
+    loadAnalyticsTag();
   } catch (error) { showToast(error.message); }
   render();
 });

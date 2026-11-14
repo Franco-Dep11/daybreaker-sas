@@ -177,6 +177,70 @@ test('handler lee __path desde req.query si Vercel no lo incluye en req.url', as
   assert.equal(JSON.parse(res.body).readOnlyPreview, false);
 });
 
+test('HTML inicial público entrega contenido, metadatos y datos estructurados reales', async () => {
+  const pages = [
+    ['/', 'DAYBREAKER S.A.S. | Catálogo y presupuestos mayoristas'],
+    ['/quienes-somos', 'Quiénes somos | DAYBREAKER S.A.S.'],
+    ['/catalogo', 'Catálogo de productos | DAYBREAKER S.A.S.'],
+    ['/presupuestos-mayoristas', 'Presupuestos mayoristas | DAYBREAKER S.A.S.'],
+    ['/contacto', 'Contacto | DAYBREAKER S.A.S.'],
+  ];
+  for (const [path, title] of pages) {
+    const response = await originalFetch(`${base}${path}`);
+    const html = await response.text();
+    assert.equal(response.status, 200, path);
+    assert.ok(html.includes(`<title>${title}</title>`), path);
+    assert.match(html, /<link rel="canonical" href="http:\/\//, path);
+    assert.match(html, /<meta property="og:title"/, path);
+    assert.match(html, /<h1[ >]/, path);
+  }
+
+  const catalogHtml = await (await originalFetch(`${base}/catalogo`)).text();
+  assert.match(catalogHtml, /href="\/productos\/legacy-product"/);
+  assert.match(catalogHtml, /Legacy preservado/);
+
+  const productResponse = await originalFetch(`${base}/productos/legacy-product`);
+  const productHtml = await productResponse.text();
+  assert.equal(productResponse.status, 200);
+  assert.match(productHtml, /<h1 class="product-title">Legacy preservado<\/h1>/);
+  assert.match(productHtml, /property="og:image" content="https:\/\/images\.example\.test\/legacy\.jpg"/);
+  const structuredData = JSON.parse(productHtml.match(/<script id="seo-jsonld" type="application\/ld\+json">([\s\S]*?)<\/script>/)[1]);
+  const productSchema = structuredData['@graph'].find(node => node['@type'] === 'Product');
+  assert.equal(productSchema.name, 'Legacy preservado');
+  assert.equal(productSchema.offers.priceCurrency, 'ARS');
+  assert.equal(productSchema.offers.price, '1250.00');
+  assert.equal(productSchema.offers.availability, 'https://schema.org/InStock');
+  assert.ok(structuredData['@graph'].some(node => node['@type'] === 'Organization'));
+  assert.ok(structuredData['@graph'].some(node => node['@type'] === 'WebSite'));
+  assert.ok(structuredData['@graph'].some(node => node['@type'] === 'BreadcrumbList'));
+
+  const sitemap = await (await originalFetch(`${base}/sitemap.xml`)).text();
+  assert.match(sitemap, /\/productos\/legacy-product/);
+  assert.doesNotMatch(sitemap, /\/carrito|\/seguimiento|\/pago|\/admin/);
+});
+
+test('Preview queda en noindex y no expone configuración ni política de Analytics', async () => {
+  const previousEnvironment = process.env.VERCEL_ENV;
+  const previousMeasurementId = process.env.GA4_MEASUREMENT_ID;
+  try {
+    process.env.VERCEL_ENV = 'preview';
+    process.env.GA4_MEASUREMENT_ID = 'G-TEST123';
+    const config = await rewrittenApi('/api/config');
+    assert.equal(config.data.noindexDeployment, true);
+    assert.equal(config.data.analyticsMeasurementId, '');
+    const response = await originalFetch(`${base}/`);
+    const html = await response.text();
+    assert.match(response.headers.get('x-robots-tag'), /noindex/);
+    assert.match(html, /<meta name="robots" content="noindex,nofollow">/);
+    assert.doesNotMatch(response.headers.get('content-security-policy'), /googletagmanager|google-analytics/);
+  } finally {
+    if (previousEnvironment === undefined) delete process.env.VERCEL_ENV;
+    else process.env.VERCEL_ENV = previousEnvironment;
+    if (previousMeasurementId === undefined) delete process.env.GA4_MEASUREMENT_ID;
+    else process.env.GA4_MEASUREMENT_ID = previousMeasurementId;
+  }
+});
+
 test('Vercel permite login y CRUD administrativo cuando D1 está verificada', async () => {
   const login = await rewrittenApi('/api/admin/login', { method: 'POST', body: { username: process.env.ADMIN_USER, password: process.env.ADMIN_PASSWORD } });
   assert.equal(login.response.status, 200);

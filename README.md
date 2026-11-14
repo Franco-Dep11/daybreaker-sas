@@ -111,3 +111,34 @@ Despues despliega el Worker desde esta rama y conserva `D1_API_SECRET` configura
 
 La interfaz permite asociar URL HTTPS existentes aun antes de configurar R2. Las cargas de archivos responden con error explicito hasta que exista el binding. En desarrollo SQLite, productos, categorias y metadatos persisten localmente; las cargas requieren que el Worker y R2 esten configurados.
 En tu equipo, luego de decidir habilitarlo, crea el bucket con `npx wrangler r2 bucket create daybreaker-product-images` y agrega el binding `ASSETS` indicado arriba. Para D1 ejecuta `npx wrangler d1 migrations apply daybreaker-sas-dev --remote`; despues de crear el binding y revisar el diff, despliega el Worker con `npx wrangler deploy`. Por ultimo, publica esta rama en Vercel Preview. No ejecutes los comandos remotos hasta autorizar ese cambio.
+
+## SEO y analítica web
+
+Las rutas públicas entregan HTML inicial con su H1, descripción, enlaces rastreables y metadatos antes de que cargue `app.js`. Las fichas se generan desde productos activos y visibles en D1; las páginas de carrito, pago, seguimiento, el catálogo vacío y las vistas Preview reciben `noindex` mediante meta y/o `X-Robots-Tag`. El sitemap se genera desde el catálogo actual y excluye carrito, pago, seguimiento, administración, productos ocultos y archivados. Las fichas incluyen JSON-LD `Product` y `BreadcrumbList`; el `Offer` aparece solo para productos con disponibilidad `available` y aclara que el flete se cotiza aparte.
+
+Para indexación, configurá `PUBLIC_BASE_URL` en Vercel Production con el origen HTTPS definitivo (por ejemplo `https://dominio-aprobado.example`, reemplazándolo por el dominio real). Si falta en Production, el servidor aplica `noindex` hasta que exista una URL canónica confiable. Los despliegues Preview siempre envían `X-Robots-Tag: noindex, nofollow`, aunque el contenido de prueba sea accesible.
+
+### Google Analytics 4
+
+La integración es opcional y no envía datos mientras `GA4_MEASUREMENT_ID` esté vacío. Para activarla, obtené el ID `G-...` de la propiedad GA4 de DAYBREAKER y agregalo únicamente en el entorno Vercel Production. El backend suprime el ID en Preview. La etiqueta no se descarga hasta que la persona acepte analítica; puede cambiar la preferencia desde el pie de página. El texto del aviso es un borrador técnico y necesita aprobación comercial/legal antes de producción.
+
+La navegación SPA envía `page_view` manuales con medición automática desactivada en `gtag`. Para evitar duplicados, en GA4 abrí **Administrador → Flujos de datos → Web → Medición mejorada → Vistas de página → Configuración avanzada** y desactivá **Cambios de página basados en eventos del historial del navegador**. La documentación oficial advierte que esa opción puede seguir enviando vistas aunque `send_page_view` sea `false`: [medir vistas de página](https://developers.google.com/analytics/devguides/collection/ga4/views?technology=websites) y [medir una SPA](https://developers.google.com/analytics/devguides/collection/ga4/single-page-applications).
+
+Se preparan `view_item`, `add_to_cart`, `begin_checkout`, `generate_lead` y `purchase`. `purchase` solo se envía cuando el seguimiento recibe el estado de pedido `payment_confirmed`; el flete se registra separado del valor de productos. Los eventos no incluyen nombre, correo, teléfono, domicilio, token, query string ni fragmento privado. La opción de consentimiento comienza con almacenamiento denegado y no implementa publicidad personalizada.
+
+Pasos manuales para GA4:
+
+1. Crear la propiedad y el flujo Web bajo la cuenta de DAYBREAKER, y copiar el ID de medición `G-...` a la variable Production `GA4_MEASUREMENT_ID` en Vercel.
+2. No configurar esa variable en Preview. Después de publicar Production, probar el aviso de consentimiento y revisar `page_view` y eventos aprobados en DebugView.
+3. Confirmar que no aparece ninguna solicitud a Google Analytics antes de aceptar; probar rechazo y revocación desde **Preferencias de analítica**.
+
+### Google Search Console
+
+No se verificó la propiedad ni se presentó el sitemap desde una cuenta de Google. Cuando el dominio definitivo esté aprobado:
+
+1. En Search Console, agregá una propiedad de tipo **Dominio** para el dominio raíz y copiá el registro TXT que Google muestra.
+2. En el proveedor DNS del dominio, agregá ese TXT sin modificar otros registros. Esperá la propagación y pulsá **Verificar**. La propiedad Dominio usa verificación DNS: [ayuda oficial de verificación](https://support.google.com/webmasters/answer/9008080) y [agregar una propiedad](https://support.google.com/webmasters/answer/34592).
+3. En **Sitemaps**, enviá `https://<dominio-definitivo>/sitemap.xml`; reemplazá el marcador por el dominio real.
+4. Inspeccioná la portada, `/catalogo` y al menos una ficha visible. Confirmá que la URL probada sea canónica, responda 200 y no tenga `noindex`. No envíes URLs Preview.
+
+La indexación de producción debe habilitarse después de configurar el dominio y `PUBLIC_BASE_URL`, confirmar los datos reales del catálogo, revisar el sitemap en Search Console y aprobar el aviso de privacidad/consentimiento. La publicación no garantiza posiciones ni indexación inmediata.

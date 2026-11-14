@@ -374,6 +374,15 @@ button { cursor: pointer; }
 .brand-footer .brand-copy strong { color: #fff; }
 .brand-footer .brand-copy small { color: #aab4af; }
 .footer-inner p, .footer-note { color: #aab4af; font-size: 10px; }
+.analytics-preferences { padding: 8px 0; color: #d4dad5; font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+.analytics-preferences:hover, .analytics-preferences:focus-visible { color: #fff; }
+.analytics-preferences:focus-visible { outline-color: #ff9877; }
+.analytics-consent { position: fixed; z-index: 45; inset: auto 18px 18px; display: flex; align-items: center; justify-content: space-between; gap: 18px; max-width: 960px; margin-inline: auto; padding: 18px; color: #172122; background: #fff; border: 1px solid #cfd4ce; border-left: 5px solid var(--accent-dark); border-radius: 10px; box-shadow: 0 12px 38px rgb(23 33 34 / 20%); }
+.analytics-consent[hidden] { display: none; }
+.analytics-consent p { margin: 4px 0 0; color: #4b5653; font-size: 12px; line-height: 1.5; }
+.analytics-consent-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
+.analytics-consent .button-outline { background: #fff; }
+.analytics-consent :focus-visible { outline: 3px solid #8c351d; outline-offset: 3px; }
 
 @media (max-width: 1080px) {
   .header-inner { gap: 20px; padding: 0 20px; }
@@ -383,6 +392,8 @@ button { cursor: pointer; }
   .header-admin { padding: 0 12px; font-size: 11px; }
 }
 @media (max-width: 780px) {
+  .analytics-consent { align-items: stretch; flex-direction: column; inset: auto 12px 12px; gap: 12px; padding: 15px; }
+  .analytics-consent-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .admin-products-layout { grid-template-columns: 1fr; }
   .admin-catalog { position: static; }
   .header-inner { min-height: 70px; display: grid; grid-template-columns: 1fr auto; gap: 0 12px; padding: 8px 18px 0; }

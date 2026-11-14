@@ -78,6 +78,14 @@ function publicBaseUrl(req) {
   return `${protocol}://${req.headers.host || `localhost:${PORT}`}`;
 }
 
+function isPreviewDeployment() {
+  return process.env.VERCEL_ENV === 'preview';
+}
+
+function deploymentNoindex() {
+  return isPreviewDeployment() || (process.env.VERCEL_ENV === 'production' && !process.env.PUBLIC_BASE_URL);
+}
+
 function configPublic() {
   const transferEnabled = Boolean(
     process.env.BANK_ACCOUNT_HOLDER && process.env.BANK_NAME && process.env.BANK_CBU,
@@ -96,6 +104,9 @@ function configPublic() {
     mercadopagoEnabled,
     adminEnabled: Boolean(process.env.ADMIN_PASSWORD),
     readOnlyPreview: Boolean(process.env.VERCEL && process.env.D1_PROXY_VERIFIED !== 'true'),
+    noindexDeployment: deploymentNoindex(),
+    analyticsMeasurementId: !isPreviewDeployment() && /^G-[A-Z0-9]+$/i.test(process.env.GA4_MEASUREMENT_ID || '')
+      ? process.env.GA4_MEASUREMENT_ID : '',
   };
 }
 
@@ -370,7 +381,12 @@ function setupHeaders(res) {
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; connect-src 'self'");
+  const analyticsAllowed = !isPreviewDeployment() && /^G-[A-Z0-9]+$/i.test(process.env.GA4_MEASUREMENT_ID || '');
+  const analyticsCsp = analyticsAllowed
+    ? ' https://www.googletagmanager.com https://*.google-analytics.com https://*.google.com'
+    : '';
+  res.setHeader('Content-Security-Policy', `default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: https:; style-src 'self'; script-src 'self'${analyticsAllowed ? ' https://www.googletagmanager.com' : ''}; connect-src 'self'${analyticsCsp}`);
+  if (deploymentNoindex()) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
 }
 
@@ -928,51 +944,151 @@ async function handleMercadoPagoWebhook(req, res, url) {
   return json(res, 200, { received: true });
 }
 
-async function serveIndex(req, res, pathname) {
-  let html = readFileSync(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
-  if (pathname.startsWith('/seguimiento/') || pathname.startsWith('/pago/')) {
-    const title = pathname.startsWith('/seguimiento/') ? 'Seguimiento privado | DAYBREAKER SAS' : 'Estado de pago | DAYBREAKER SAS';
-    html = html
-      .replace('<title>DAYBREAKER SAS | Comercial</title>', `<title>${escapeHtml(title)}</title>`)
-      .replace('<!--product-canonical-->', '<meta name="robots" content="noindex,nofollow">');
-  }
-  const pages = {
-    '/': ['DAYBREAKER SAS | Inicio', 'Catálogo minorista y presupuestos mayoristas de DAYBREAKER SAS para toda Argentina.'],
-    '/index.html': ['DAYBREAKER SAS | Inicio', 'Catálogo minorista y presupuestos mayoristas de DAYBREAKER SAS para toda Argentina.'],
-    '/quienes-somos': ['Quiénes somos | DAYBREAKER SAS', 'Conocé el canal comercial de DAYBREAKER SAS para compras minoristas y consultas mayoristas en Argentina.'],
-    '/catalogo': ['Catálogo | DAYBREAKER SAS', 'Consultá el catálogo minorista de DAYBREAKER SAS, precios en pesos argentinos y disponibilidad de productos.'],
-    '/presupuestos-mayoristas': ['Presupuestos mayoristas | DAYBREAKER SAS', 'Solicitá un presupuesto mayorista de DAYBREAKER SAS con productos, cantidades y destino.'],
-    '/carrito': ['Carrito y seguimiento | DAYBREAKER SAS', 'Armá tu pedido minorista y consultá su estado con tu enlace privado de seguimiento.'],
-    '/contacto': ['Contacto | DAYBREAKER SAS', 'Contactá a DAYBREAKER SAS por consultas comerciales, compras minoristas y presupuestos mayoristas.'],
-  };
-  const page = pages[pathname];
-  if (page) {
-    const [title, description] = page;
-    const canonical = `${publicBaseUrl(req)}${pathname === '/index.html' ? '/' : pathname}`;
-    html = html
-      .replace('<title>DAYBREAKER SAS | Comercial</title>', `<title>${escapeHtml(title)}</title>`)
-      .replace('content="Catálogo minorista y presupuestos mayoristas de DAYBREAKER SAS para toda Argentina."', `content="${escapeHtml(description)}"`)
-      .replace('<!--product-canonical-->', `<link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}">`);
-  }
-  const match = pathname.match(/^\/productos\/([a-z0-9-]+)$/i);
-  if (match) {
-    const product = (await db.prepare('SELECT name, short_description, slug FROM products WHERE slug = ? AND active = 1 AND visible_in_store = 1').get(match[1]));
-    if (!product) {
-      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-      return res.end(html.replace('<title>DAYBREAKER SAS | Comercial</title>', '<title>Producto no encontrado | DAYBREAKER SAS</title>'));
-    }
-    const title = `${product.name} | DAYBREAKER SAS`;
-    const description = product.short_description || `Consultá precio minorista, disponibilidad y cotización mayorista de ${product.name}.`;
-    const canonical = `${publicBaseUrl(req)}/productos/${encodeURIComponent(product.slug)}`;
-    html = html
-      .replace('<title>DAYBREAKER SAS | Comercial</title>', `<title>${escapeHtml(title)}</title>`)
-      .replace('content="Catálogo minorista y presupuestos mayoristas de DAYBREAKER SAS para toda Argentina."', `content="${escapeHtml(description)}"`)
-      .replace('<!--product-canonical-->', `<link rel="canonical" href="${escapeHtml(canonical)}"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}">`);
-  }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
-  res.end(html);
+function jsonLd(value) {
+  return JSON.stringify(value).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
 }
 
+function makeSeoHead(html, { title, description, canonical, image, ogType = 'website', schemas = [], noindex = false }) {
+  const head = [];
+  if (noindex) head.push('<meta name="robots" content="noindex,nofollow">');
+  else if (canonical) head.push(`<link rel="canonical" href="${escapeHtml(canonical)}">`);
+  if (!noindex && canonical) {
+    head.push(`<meta property="og:type" content="${ogType}"><meta property="og:site_name" content="DAYBREAKER S.A.S."><meta property="og:locale" content="es_AR"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">`);
+    head.push(`<meta name="twitter:card" content="${image ? 'summary_large_image' : 'summary'}"><meta name="twitter:title" content="${escapeHtml(title)}"><meta name="twitter:description" content="${escapeHtml(description)}">`);
+    if (image) head.push(`<meta property="og:image" content="${escapeHtml(image)}"><meta name="twitter:image" content="${escapeHtml(image)}">`);
+    if (schemas.length) head.push(`<script id="seo-jsonld" type="application/ld+json">${jsonLd({ '@context': 'https://schema.org', '@graph': schemas })}</script>`);
+  }
+  return html
+    .replace(/<title>[\s\S]*?<\/title>/, `<title>${escapeHtml(title)}</title>`)
+    .replace(/<meta name="description" content="[^"]*">/, `<meta name="description" content="${escapeHtml(description)}">`)
+    .replace('<!--seo-head-->', head.join(''));
+}
+
+function organizationSchemas(base) {
+  const organizationId = `${base}/#organization`;
+  return [
+    { '@type': 'Organization', '@id': organizationId, name: 'DAYBREAKER S.A.S.', legalName: 'DAYBREAKER S.A.S.', url: `${base}/`, logo: `${base}/favicon.svg` },
+    { '@type': 'WebSite', '@id': `${base}/#website`, url: `${base}/`, name: 'DAYBREAKER S.A.S.', inLanguage: 'es-AR', publisher: { '@id': organizationId } },
+  ];
+}
+
+function productSchemas(product, canonical, base) {
+  const schemas = organizationSchemas(base);
+  const images = [...new Set([product.imageUrl, ...(product.images || []).map(image => image.url)].filter(Boolean))];
+  const description = product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`;
+  const productSchema = {
+    '@type': 'Product', '@id': `${canonical}#product`, name: product.name, description,
+    ...(images.length ? { image: images } : {}),
+  };
+  if (product.availability === 'available') {
+    productSchema.offers = {
+      '@type': 'Offer', url: canonical, priceCurrency: 'ARS',
+      price: (product.retailPriceCents / 100).toFixed(2), availability: 'https://schema.org/InStock',
+      description: 'Precio minorista del producto. El flete se cotiza por separado; el pago se habilita al aceptar el total final.',
+      seller: { '@id': `${base}/#organization` },
+    };
+  }
+  schemas.push(productSchema, {
+    '@type': 'BreadcrumbList', itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Inicio', item: `${base}/` },
+      { '@type': 'ListItem', position: 2, name: 'Catálogo', item: `${base}/catalogo` },
+      { '@type': 'ListItem', position: 3, name: product.name, item: canonical },
+    ],
+  });
+  return schemas;
+}
+
+function seoProductLink(product) {
+  const href = `/productos/${encodeURIComponent(product.slug)}`;
+  const image = product.image_url
+    ? `<img src="${escapeHtml(product.image_url)}" alt="${escapeHtml(product.name)}" width="640" height="640" loading="lazy" decoding="async">`
+    : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
+  const badge = product.availability === 'available' ? '<span class="badge">Disponible</span>' : product.availability === 'on_request' ? '<span class="badge badge-warn">A pedido</span>' : '<span class="badge badge-muted">Agotado</span>';
+  const price = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2 }).format(product.retail_price_cents / 100);
+  const purchaseAction = product.availability === 'available'
+    ? `<button class="button button-dark button-block" type="button" data-action="add-cart" data-product-id="${escapeHtml(product.id)}">Agregar al carrito</button>`
+    : `<button class="button button-outline button-block" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Consultar disponibilidad</button>`;
+  return `<article class="product-card"><a class="product-image" href="${href}" aria-label="Ver ${escapeHtml(product.name)}">${image}${badge}</a><div class="product-content"><h3><a href="${href}">${escapeHtml(product.name)}</a></h3><p>${escapeHtml(product.short_description || 'Consultá las especificaciones y disponibilidad de este producto.')}</p><span class="product-price-label">Precio minorista</span><strong class="product-price">${price}</strong><div class="product-actions">${purchaseAction}<a class="button button-outline button-block" href="${href}">Ver ficha <span aria-hidden="true">↗</span></a><button class="text-button" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Solicitar cotización mayorista</button></div></div></article>`;
+}
+
+function seoPageContent(pathname, products = [], product = null) {
+  const homeProducts = products.slice(0, 6);
+  const productLinks = homeProducts.length ? `<section class="section section-compact home-products"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Catálogo minorista</span><h2>Productos disponibles</h2><p>Consultá las fichas, precios y disponibilidad del catálogo.</p></div><div class="product-grid">${homeProducts.map(seoProductLink).join('')}</div><p><a class="button button-outline" href="/catalogo">Ver catálogo completo</a></p></div></section>` : '';
+  if (product) {
+    const description = product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`;
+    const images = product.images?.length ? product.images : (product.imageUrl ? [{ url: product.imageUrl, altText: product.name }] : []);
+    const mainImage = product.imageUrl
+      ? `<img src="${escapeHtml(product.imageUrl)}" alt="${escapeHtml(product.name)}" width="800" height="800" fetchpriority="high">`
+      : '<span class="product-image-mark">DAYBREAKER / PRODUCTO</span>';
+    const gallery = images.length > 1 ? `<div class="product-gallery">${images.map(image => `<img src="${escapeHtml(image.url)}" alt="${escapeHtml(image.altText || product.name)}" width="320" height="320" loading="lazy" decoding="async">`).join('')}</div>` : '';
+    const availability = { available: 'Disponible', sold_out: 'Agotado', on_request: 'A pedido' }[product.availability] || 'Consultar disponibilidad';
+    const availabilityBadge = product.availability === 'available' ? '<span class="badge">Disponible</span>' : product.availability === 'on_request' ? '<span class="badge badge-warn">A pedido</span>' : '<span class="badge badge-muted">Agotado</span>';
+    const price = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2 }).format(product.retailPriceCents / 100);
+    const canBuy = product.availability === 'available';
+    return `<section class="section"><div class="section-shell"><p class="kicker"><a href="/catalogo">Catálogo</a> / Ficha de producto</p><div class="split-layout product-detail-layout"><div><div class="product-image product-detail-image">${mainImage}${availabilityBadge}</div>${gallery}</div><div><span class="eyebrow">Ficha de producto</span><h1 class="product-title">${escapeHtml(product.name)}</h1>${availabilityBadge}<p class="product-description">${escapeHtml(product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`)}</p><span class="product-price-label">Precio minorista</span><strong class="product-price product-price-detail">${price}</strong><p class="product-shipping-note">El transporte se cotiza según domicilio, volumen y cantidad. El pago queda habilitado después de aceptar el total final.</p>${product.specifications ? `<div class="panel-card specification-panel"><h2>Especificaciones</h2><p>${escapeHtml(product.specifications)}</p></div>` : ''}<div class="hero-actions">${canBuy ? `<button class="button button-accent" type="button" data-action="add-cart" data-product-id="${escapeHtml(product.id)}">Agregar al carrito</button>` : '<span class="badge badge-warn">Consultá disponibilidad</span>'}<button class="button button-outline" type="button" data-action="quote-product" data-product-id="${escapeHtml(product.id)}">Cotizar al por mayor</button></div>${product.technicalPdfUrl ? `<p><a href="${escapeHtml(product.technicalPdfUrl)}" target="_blank" rel="noopener noreferrer">Abrir ficha técnica PDF ↗</a></p>` : ''}</div></div></div></section>`;
+  }
+  if (pathname === '/' || pathname === '/index.html') return `<section class="hero"><div class="hero-inner"><div class="hero-copy"><span class="eyebrow">DAYBREAKER S.A.S. · Argentina</span><h1>Comercio claro.<br><em>Operación confiable.</em></h1><p class="hero-lede">Catálogo minorista y atención mayorista, con precios visibles y envío cotizado antes de confirmar el pago.</p><div class="hero-actions"><a class="button button-accent" href="/catalogo">Explorar catálogo</a><a class="button button-outline" href="/presupuestos-mayoristas">Solicitar presupuesto</a></div></div></div></section><div class="feature-strip"><div class="feature-cell"><strong>Precio minorista visible</strong><span>El precio final de productos se muestra en pesos argentinos.</span></div><div class="feature-cell"><strong>Flete informado antes del pago</strong><span>El total final se acepta antes de habilitar el pago.</span></div><div class="feature-cell"><strong>Atención mayorista</strong><span>Enviá productos y cantidades para solicitar un presupuesto.</span></div></div>${productLinks}`;
+  if (pathname === '/catalogo') return `<section class="section"><div class="section-shell"><div class="section-heading"><span class="eyebrow">Catálogo</span><h1>Productos y soluciones</h1><p>Precios minoristas en pesos argentinos. El costo de transporte se cotiza por separado según el destino.</p></div>${products.length ? `<div class="catalog-toolbar"><div><span class="eyebrow">Compra minorista</span><h2>Productos</h2></div><label class="field search-field"><span class="field-label">Buscar en el catálogo</span><input id="catalog-search" type="search" placeholder="Nombre o descripción" autocomplete="off"></label></div><div class="product-grid" id="product-grid">${products.map(seoProductLink).join('')}</div>` : '<div class="empty-state"><h3>El catálogo se está preparando.</h3><p>Los productos, precios y materiales autorizados aparecerán aquí con sus fichas y opciones de compra.</p></div>'}</div></section>`;
+  const content = {
+    '/quienes-somos': ['DAYBREAKER S.A.S.', 'Un espacio de atención comercial para compras minoristas y consultas mayoristas. Los precios minoristas se publican en pesos argentinos y las condiciones mayoristas se conversan caso por caso.', '/contacto', 'Contactar al equipo'],
+    '/presupuestos-mayoristas': ['Solicitá un presupuesto mayorista', 'Enviá productos, cantidades y destino. DAYBREAKER revisará la solicitud y responderá de forma manual por email o WhatsApp.', '/catalogo', 'Consultar productos'],
+    '/contacto': ['Contactá a DAYBREAKER S.A.S.', 'Para consultas minoristas, mayoristas o de seguimiento, elegí el canal comercial disponible.', '/presupuestos-mayoristas', 'Solicitar un presupuesto'],
+    '/carrito': ['Carrito y seguimiento de pedidos', 'Completá los datos de entrega para registrar un pedido. El flete se cotiza y se acepta antes de habilitar el pago.', '/catalogo', 'Volver al catálogo'],
+  }[pathname];
+  if (content) return `<section class="section"><div class="section-shell"><h1>${escapeHtml(content[0])}</h1><p>${escapeHtml(content[1])}</p><a href="${content[2]}">${escapeHtml(content[3])}</a></div></section>`;
+  if (pathname.startsWith('/seguimiento/')) return '<section class="section"><div class="section-shell"><h1>Seguimiento privado de pedido</h1><p>Consultá el estado del pedido desde el enlace privado que recibiste.</p></div></section>';
+  if (pathname.startsWith('/pago/')) return '<section class="section"><div class="section-shell"><h1>Estado de pago</h1><p>El servidor confirma el estado después de validar la notificación oficial.</p></div></section>';
+  return '<section class="section"><div class="section-shell"><h1>Página no encontrada</h1><p>No encontramos esa página.</p><a href="/">Ir al inicio</a></div></section>';
+}
+
+async function serveIndex(req, res, pathname) {
+  let html = readFileSync(resolve(PUBLIC_DIR, 'index.html'), 'utf8');
+  const base = publicBaseUrl(req);
+  const privatePath = pathname === '/carrito' || pathname === '/seguimiento' || pathname.startsWith('/seguimiento/') || pathname === '/pago' || pathname.startsWith('/pago/');
+  const pages = {
+    '/': ['DAYBREAKER S.A.S. | Catálogo y presupuestos mayoristas', 'Catálogo de productos de DAYBREAKER S.A.S. con precios minoristas en pesos argentinos y atención para consultas mayoristas.'],
+    '/index.html': ['DAYBREAKER S.A.S. | Catálogo y presupuestos mayoristas', 'Catálogo de productos de DAYBREAKER S.A.S. con precios minoristas en pesos argentinos y atención para consultas mayoristas.'],
+    '/quienes-somos': ['Quiénes somos | DAYBREAKER S.A.S.', 'Conocé DAYBREAKER S.A.S., su catálogo minorista y su canal de atención para consultas mayoristas.'],
+    '/catalogo': ['Catálogo de productos | DAYBREAKER S.A.S.', 'Consultá productos, precios minoristas en pesos argentinos y disponibilidad en el catálogo de DAYBREAKER S.A.S.'],
+    '/presupuestos-mayoristas': ['Presupuestos mayoristas | DAYBREAKER S.A.S.', 'Solicitá un presupuesto mayorista de DAYBREAKER S.A.S. indicando productos, cantidades y destino.'],
+    '/carrito': ['Carrito y seguimiento | DAYBREAKER S.A.S.', 'Armá tu pedido minorista y consultá su estado mediante el enlace privado de seguimiento.'],
+    '/contacto': ['Contacto | DAYBREAKER S.A.S.', 'Contactá a DAYBREAKER S.A.S. por consultas comerciales, compras minoristas y presupuestos mayoristas.'],
+  };
+  const match = pathname.match(/^\/productos\/([a-z0-9-]+)$/i);
+  let product = null;
+  let products = [];
+  if (pathname === '/' || pathname === '/index.html' || pathname === '/catalogo') {
+    products = await db.prepare('SELECT * FROM products WHERE active = 1 AND visible_in_store = 1 ORDER BY name COLLATE NOCASE').all();
+  }
+  if (match) {
+    const row = await db.prepare('SELECT * FROM products WHERE slug = ? AND active = 1 AND visible_in_store = 1').get(match[1]);
+    if (!row) {
+      res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+      html = makeSeoHead(html, { title: 'Producto no encontrado | DAYBREAKER S.A.S.', description: 'No encontramos ese producto en el catálogo.', noindex: true });
+      html = html.replace('<!--seo-content-->', seoPageContent('/producto-no-encontrado'));
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+      return res.end(html);
+    }
+    [product] = await withProductImages([row]);
+  }
+
+  const knownPage = Boolean(pages[pathname] || product || privatePath);
+  const meta = product
+    ? [`${product.name} | DAYBREAKER S.A.S.`, product.shortDescription || `Consultá precio minorista y disponibilidad de ${product.name}. El flete se cotiza según destino.`]
+    : (pages[pathname] || [pathname.startsWith('/seguimiento') ? 'Seguimiento privado | DAYBREAKER S.A.S.' : pathname.startsWith('/pago') ? 'Estado de pago | DAYBREAKER S.A.S.' : 'Página no encontrada | DAYBREAKER S.A.S.', 'Información comercial de DAYBREAKER S.A.S.']);
+  const noindex = deploymentNoindex() || privatePath || !knownPage || (pathname === '/catalogo' && products.length === 0);
+  const canonicalPath = product ? `/productos/${encodeURIComponent(product.slug)}` : pathname === '/index.html' ? '/' : pathname;
+  const canonical = noindex ? '' : `${base}${canonicalPath}`;
+  const imageSource = product?.images?.find(image => image.isPrimary)?.url || product?.imageUrl || product?.images?.[0]?.url;
+  const image = imageSource ? new URL(imageSource, `${base}/`).href : '';
+  const schemas = !noindex && (product || pages[pathname]) ? organizationSchemas(base) : [];
+  if (product && !noindex) schemas.push(...productSchemas(product, canonical, base).slice(2));
+  if (privatePath || noindex) res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  html = makeSeoHead(html, { title: meta[0], description: meta[1], canonical, image, ogType: product ? 'product' : 'website', schemas, noindex });
+  html = html.replace('<!--seo-content-->', seoPageContent(pathname, products, product));
+  res.writeHead(noindex && !knownPage ? 404 : 200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
+  res.end(html);
+}
 function staticFile(res, pathname) {
   let decoded;
   try { decoded = decodeURIComponent(pathname); } catch { res.writeHead(400); return res.end(); }
@@ -1002,12 +1118,12 @@ export async function handleRequest(req, res) {
     }
     if (url.pathname === '/robots.txt') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-      return res.end('User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /seguimiento/\nDisallow: /pago/\nSitemap: ' + publicBaseUrl(req) + '/sitemap.xml\n');
+      return res.end('User-agent: *\nAllow: /\nDisallow: /api/\nSitemap: ' + publicBaseUrl(req) + '/sitemap.xml\n');
     }
     if (url.pathname === '/sitemap.xml') {
       const base = escapeHtml(publicBaseUrl(req));
       const products = (await db.prepare('SELECT slug, updated_at FROM products WHERE active = 1 AND visible_in_store = 1 ORDER BY slug').all());
-      const pages = ['/', '/quienes-somos', '/catalogo', '/presupuestos-mayoristas', '/carrito', '/contacto'];
+      const pages = ['/', '/quienes-somos', ...(products.length ? ['/catalogo'] : []), '/presupuestos-mayoristas', '/contacto'];
       const urls = [...pages.map(path => `<url><loc>${base}${path === '/' ? '/' : path}</loc></url>`), ...products.map(product =>
         `<url><loc>${base}/productos/${encodeURIComponent(product.slug)}</loc><lastmod>${product.updated_at.slice(0, 10)}</lastmod></url>`),
       ];
