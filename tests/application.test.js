@@ -94,10 +94,13 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   const conflictingRetry = await api('/api/orders', { method: 'POST', body: { ...orderBody, notes: 'otro pedido' } });
   assert.equal(conflictingRetry.response.status, 409);
   assert.equal((await api('/api/admin/orders', { auth: true })).data.length, 1);
-  assert.equal((await api('/api/admin/orders', { auth: true })).data[0].id, orderResult.data.id);
+  const adminOrder = (await api('/api/admin/orders', { auth: true })).data[0];
+  assert.equal(adminOrder.id, orderResult.data.id);
+  assert.equal(adminOrder.province, 'Buenos Aires');
   const token = orderResult.data.trackingUrl.split('#')[1];
   const track = body => api('/api/track', { method: 'POST', body });
   const unaccepted = await track({ id: orderResult.data.id, token });
+  assert.equal(unaccepted.data.province, 'Buenos Aires');
   assert.equal(unaccepted.data.freightAccepted, false);
   assert.equal(unaccepted.data.payments.length, 0);
   assert.equal((await api(`/api/admin/products/${product.id}`, { method: 'DELETE', auth: true })).response.status, 200);

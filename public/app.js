@@ -2,6 +2,12 @@ const app = document.querySelector('#app');
 const toastBox = document.querySelector('#toast');
 const cartStorageKey = 'daybreaker-cart-v1';
 const adminSessionMaxAgeMs = 60_000;
+const argentineProvinces = [
+  'Buenos Aires', 'Catamarca', 'Chaco', 'Chubut', 'Ciudad Autónoma de Buenos Aires',
+  'Córdoba', 'Corrientes', 'Entre Ríos', 'Formosa', 'Jujuy', 'La Pampa', 'La Rioja',
+  'Mendoza', 'Misiones', 'Neuquén', 'Río Negro', 'Salta', 'San Juan', 'San Luis',
+  'Santa Cruz', 'Santa Fe', 'Santiago del Estero', 'Tierra del Fuego', 'Tucumán',
+];
 const statusText = {
   received: 'Pedido recibido',
   freight_quoted: 'Flete cotizado',
@@ -44,6 +50,10 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   })[character]);
+}
+
+function provinceSelect(id, selected = '') {
+  return `<select id="${escapeHtml(id)}" name="province" autocomplete="address-level1" required><option value="" disabled ${selected ? '' : 'selected'}>Seleccioná una provincia</option>${argentineProvinces.map(province => `<option value="${escapeHtml(province)}" ${province === selected ? 'selected' : ''}>${escapeHtml(province)}</option>`).join('')}</select>`;
 }
 
 function money(cents) {
@@ -290,7 +300,7 @@ function cartPage() {
       <div class="field"><label for="order-postal">Código postal</label><input id="order-postal" name="postalCode" autocomplete="postal-code" maxlength="24" required></div>
       <div class="field field-full"><label for="order-address">Domicilio de entrega</label><input id="order-address" name="address" autocomplete="street-address" maxlength="240" required></div>
       <div class="field"><label for="order-locality">Localidad</label><input id="order-locality" name="locality" autocomplete="address-level2" maxlength="120" required></div>
-      <div class="field"><label for="order-province">Provincia</label><input id="order-province" name="province" autocomplete="address-level1" maxlength="120" required></div>
+      <div class="field"><label for="order-province">Provincia</label>${provinceSelect('order-province')}</div>
       <div class="field field-full"><label for="order-notes">Observaciones</label><textarea id="order-notes" name="notes" maxlength="1000" placeholder="Indicaciones para la entrega (opcional)"></textarea></div>
     </div>
     <div class="notice notice-dark notice-cart-total">El total inicial de <strong>${money(total)}</strong> corresponde solo a productos. El pago no se habilita hasta que recibas y aceptes el flete cotizado.</div>
