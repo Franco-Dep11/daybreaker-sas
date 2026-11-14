@@ -846,11 +846,28 @@ async function handleSubmit(form) {
     errorBox.hidden = true;
     const items = Object.entries(state.cart).filter(([, amount]) => Number(amount) > 0).map(([productId, amount]) => ({ productId, quantity: Number(amount) }));
     try {
-      const order = await api('/api/orders', { method: 'POST', body: {
+      const checkout = {
         customerName: data.get('customerName'), email: data.get('email'), phone: data.get('phone'),
         address: data.get('address'), province: data.get('province'), locality: data.get('locality'),
         postalCode: data.get('postalCode'), notes: data.get('notes'), items,
-      } });
+      };
+      const fingerprintBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(checkout)));
+      const checkoutFingerprint = [...new Uint8Array(fingerprintBytes)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+      let attempt;
+      try { attempt = JSON.parse(sessionStorage.getItem('daybreaker-checkout-attempt') || 'null'); } catch {}
+      if (!attempt || attempt.fingerprint !== checkoutFingerprint) {
+        const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+        let binaryToken = '';
+        tokenBytes.forEach(byte => { binaryToken += String.fromCharCode(byte); });
+        attempt = {
+          fingerprint: checkoutFingerprint,
+          idempotencyKey: crypto.randomUUID(),
+          trackingToken: btoa(binaryToken).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''),
+        };
+        sessionStorage.setItem('daybreaker-checkout-attempt', JSON.stringify(attempt));
+      }
+      const order = await api('/api/orders', { method: 'POST', body: { ...checkout, ...attempt } });
+      sessionStorage.removeItem('daybreaker-checkout-attempt');
       state.cart = {}; saveCart();
       const [path, hash] = order.trackingUrl.split('#');
       window.history.pushState({}, '', `${path}#${hash}`);

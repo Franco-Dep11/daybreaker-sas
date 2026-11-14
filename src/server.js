@@ -42,6 +42,21 @@ function sameHash(left, right) {
   return a.length === 32 && b.length === 32 && timingSafeEqual(a, b);
 }
 
+async function findIdempotentOrder(keyHash, fingerprint, trackingToken) {
+  const existing = await db.prepare('SELECT id, tracking_token_hash, subtotal_cents, idempotency_fingerprint FROM orders WHERE idempotency_key_hash = ?').get(keyHash);
+  if (!existing) return null;
+  if (existing.idempotency_fingerprint !== fingerprint || !sameHash(existing.tracking_token_hash, sha256(trackingToken))) {
+    throw badRequest('La solicitud ya se usó con otros datos. Revisá el seguimiento antes de volver a enviar el pedido.', 409, 'IDEMPOTENCY_CONFLICT');
+  }
+  return {
+    id: existing.id,
+    subtotalCents: existing.subtotal_cents,
+    freightPending: true,
+    trackingUrl: `/seguimiento/${existing.id}#${trackingToken}`,
+    message: 'Recibimos tu pedido. DAYBREAKER cotizará el flete y te enviará el total para que lo aceptes antes de pagar.',
+  };
+}
+
 function providerAmountCents(value) {
   const amount = String(value ?? '');
   const match = amount.match(/^(\d+)(?:\.(\d{1,2}))?$/);
@@ -265,6 +280,15 @@ async function publicOrder(order) {
   };
 }
 
+async function paymentResponse(order, payment, method) {
+  return {
+    payment: { id: payment.id, method: payment.method, status: payment.status, amountCents: payment.amount_cents },
+    checkoutUrl: payment.checkout_url || '',
+    bankDetails: method === 'transfer' ? bankDetails() : null,
+    order: await publicOrder(order),
+  };
+}
+
 async function adminOrder(order) {
   const payments = await db.prepare(`SELECT id, method, status, amount_cents, provider_preference_id,
     provider_payment_id, created_at, confirmed_at FROM payments WHERE order_id = ? ORDER BY created_at DESC`).all(order.id);
@@ -381,12 +405,25 @@ async function api(req, res, url) {
       postalCode: text(body.postalCode, 'Código postal', { max: 24 }),
       notes: text(body.notes || '', 'Observaciones', { required: false, max: 1000 }),
     };
+    const idempotencyKey = text(body.idempotencyKey, 'Identificador de operación', { max: 64 });
+    const trackingToken = text(body.trackingToken, 'Token de seguimiento', { max: 64 });
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)
+      || !/^[A-Za-z0-9_-]{43}$/.test(trackingToken)) {
+      throw badRequest('No se pudo validar el intento de pedido.', 400, 'INVALID_IDEMPOTENCY_KEY');
+    }
     const itemMap = new Map();
     for (const raw of body.items) {
       const productId = text(raw.productId, 'Producto', { max: 80 });
       const amount = quantity(raw.quantity);
       itemMap.set(productId, (itemMap.get(productId) || 0) + amount);
     }
+    const fingerprint = sha256(`${idempotencyKey}:${JSON.stringify({
+      customer,
+      items: [...itemMap.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([productId, amount]) => ({ productId, quantity: amount })),
+    })}`);
+    const idempotencyKeyHash = sha256(idempotencyKey);
+    const replay = await findIdempotentOrder(idempotencyKeyHash, fingerprint, trackingToken);
+    if (replay) return json(res, 200, replay);
     const items = [];
     for (const [productId, amount] of itemMap) {
       const product = (await db.prepare(`SELECT id, slug, name, retail_price_cents, availability
@@ -398,25 +435,30 @@ async function api(req, res, url) {
     const subtotal = items.reduce((sum, item) => sum + item.lineTotalCents, 0);
     if (!Number.isSafeInteger(subtotal) || subtotal <= 0) throw badRequest('No se pudo calcular el importe del carrito.');
     const id = randomBytes(12).toString('hex');
-    const token = randomBytes(32).toString('base64url');
     const timestamp = now();
-    await transaction(async () => {
-      (await db.prepare(`INSERT INTO orders (id, tracking_token_hash, customer_name, email, phone, address, province,
-        locality, postal_code, notes, subtotal_cents, freight_cents, total_cents, status, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'received', ?, ?)`)
-        .run(id, sha256(token), customer.name, customer.email, customer.phone, customer.address,
-          customer.province, customer.locality, customer.postalCode, customer.notes, subtotal, subtotal, timestamp, timestamp));
-      const insertItem = db.prepare(`INSERT INTO order_items (id, order_id, product_id, product_slug, product_name,
-        unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-      for (const item of items) insertItem.run(randomUUID(), id, item.id, item.slug, item.name,
-        item.retail_price_cents, item.quantity, item.lineTotalCents);
-      logOrderEvent(id, 'received', { subtotalCents: subtotal });
-    });
+    try {
+      await transaction(async () => {
+        (await db.prepare(`INSERT INTO orders (id, tracking_token_hash, idempotency_key_hash, idempotency_fingerprint, customer_name, email, phone, address, province,
+          locality, postal_code, notes, subtotal_cents, freight_cents, total_cents, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'received', ?, ?)`)
+          .run(id, sha256(trackingToken), idempotencyKeyHash, fingerprint, customer.name, customer.email, customer.phone, customer.address,
+            customer.province, customer.locality, customer.postalCode, customer.notes, subtotal, subtotal, timestamp, timestamp));
+        const insertItem = db.prepare(`INSERT INTO order_items (id, order_id, product_id, product_slug, product_name,
+          unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+        for (const item of items) insertItem.run(randomUUID(), id, item.id, item.slug, item.name,
+          item.retail_price_cents, item.quantity, item.lineTotalCents);
+        logOrderEvent(id, 'received', { subtotalCents: subtotal });
+      });
+    } catch (error) {
+      const concurrentReplay = await findIdempotentOrder(idempotencyKeyHash, fingerprint, trackingToken).catch(() => null);
+      if (concurrentReplay) return json(res, 200, concurrentReplay);
+      throw error;
+    }
     return json(res, 201, {
       id,
       subtotalCents: subtotal,
       freightPending: true,
-      trackingUrl: `/seguimiento/${id}#${token}`,
+      trackingUrl: `/seguimiento/${id}#${trackingToken}`,
       message: 'Recibimos tu pedido. DAYBREAKER cotizará el flete y te enviará el total para que lo aceptes antes de pagar.',
     });
   }
@@ -474,23 +516,24 @@ async function api(req, res, url) {
     const existing = (await db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`)
       .get(order.id, methodName));
     if (existing && existing.status !== 'failed') {
-      return json(res, 200, {
-        payment: { id: existing.id, method: existing.method, status: existing.status, amountCents: existing.amount_cents },
-        checkoutUrl: existing.checkout_url || '',
-        bankDetails: methodName === 'transfer' ? bankDetails() : null,
-        order: await publicOrder(order),
-      });
+      return json(res, 200, await paymentResponse(order, existing, methodName));
     }
     const paymentId = randomUUID();
     const timestamp = now();
     if (methodName === 'transfer') {
       if (!configPublic().transferEnabled) throw badRequest('La cuenta bancaria de DAYBREAKER todavía no está configurada.', 503, 'PAYMENT_NOT_CONFIGURED');
-      await transaction(async () => {
-        (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, created_at)
-          VALUES (?, ?, 'transfer', ?, 'pending_verification', ?)`)
-          .run(paymentId, order.id, order.total_cents, timestamp));
-        logOrderEvent(order.id, 'transfer_instructions_shown', { amountCents: order.total_cents });
-      });
+      try {
+        await transaction(async () => {
+          (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, active_request, created_at)
+            VALUES (?, ?, 'transfer', ?, 'pending_verification', 1, ?)`)
+            .run(paymentId, order.id, order.total_cents, timestamp));
+          logOrderEvent(order.id, 'transfer_instructions_shown', { amountCents: order.total_cents });
+        });
+      } catch (error) {
+        const concurrent = await db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`).get(order.id, methodName);
+        if (!concurrent || concurrent.status === 'failed') throw error;
+        return json(res, 200, await paymentResponse(order, concurrent, methodName));
+      }
       return json(res, 201, {
         payment: { id: paymentId, method: methodName, status: 'pending_verification', amountCents: order.total_cents },
         bankDetails: bankDetails(),
@@ -503,11 +546,20 @@ async function api(req, res, url) {
       FROM order_items WHERE order_id = ? ORDER BY rowid`).all(order.id));
     const preference = await createPreference(order, items);
     await transaction(async () => {
-      (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, provider_preference_id,
-        checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', ?, ?, ?)`)
+      (await db.prepare(`INSERT INTO payments (id, order_id, method, amount_cents, status, active_request, provider_preference_id,
+        checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', 1, ?, ?, ?)`)
         .run(paymentId, order.id, order.total_cents, preference.id, preference.url, timestamp));
       logOrderEvent(order.id, 'mercadopago_checkout_created', { amountCents: order.total_cents });
+    }).catch(async error => {
+      const concurrent = await db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`).get(order.id, methodName);
+      if (!concurrent || concurrent.status === 'failed') throw error;
+      return concurrent;
     });
+    const savedPayment = await db.prepare(`SELECT * FROM payments WHERE id = ?`).get(paymentId);
+    if (!savedPayment) {
+      const concurrent = await db.prepare(`SELECT * FROM payments WHERE order_id = ? AND method = ? ORDER BY created_at DESC LIMIT 1`).get(order.id, methodName);
+      return json(res, 200, await paymentResponse(order, concurrent, methodName));
+    }
     return json(res, 201, {
       payment: { id: paymentId, method: methodName, status: 'pending', amountCents: order.total_cents },
       checkoutUrl: preference.url,
@@ -870,7 +922,7 @@ async function handleMercadoPagoWebhook(req, res, url) {
       logOrderEvent(payment.order_id, 'payment_confirmed', { method: 'mercadopago', amountCents: remoteCents });
     });
   } else if (['rejected', 'cancelled'].includes(remote.status)) {
-    (await db.prepare(`UPDATE payments SET status = 'failed', provider_payment_id = ? WHERE id = ?`)
+    (await db.prepare(`UPDATE payments SET status = 'failed', provider_payment_id = ?, active_request = 0 WHERE id = ?`)
       .run(String(remote.id), payment.id));
   }
   return json(res, 200, { received: true });

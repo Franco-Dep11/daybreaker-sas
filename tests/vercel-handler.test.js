@@ -23,6 +23,7 @@ sqlDb.prepare(`INSERT INTO orders (id, tracking_token_hash, customer_name, email
 sqlDb.prepare('INSERT INTO order_items (id, order_id, product_id, product_slug, product_name, unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run('legacy-order-item', 'legacy-order', 'legacy-product', 'legacy-product', 'Legacy preservado', 125000, 1, 125000);
 sqlDb.exec(readFileSync(resolve('migrations/0002_admin_catalog.sql'), 'utf8'));
 sqlDb.exec(readFileSync(resolve('migrations/0003_product_image_positions.sql'), 'utf8'));
+sqlDb.exec(readFileSync(resolve('migrations/0004_checkout_idempotency.sql'), 'utf8'));
 const binding = {
   prepare(sql) {
     return {
@@ -248,6 +249,7 @@ test('0002 conserva productos existentes y D1 administra categorias, stock y vis
   assert.equal((await rewrittenApi('/api/catalog')).data.some(product => product.id === created.data.id), false);
   const hiddenOrder = await rewrittenApi('/api/orders', { method: 'POST', body: {
     customerName: 'Comprador', email: 'buyer@example.test', phone: '1122334455', address: 'Calle 10', province: 'Buenos Aires', locality: 'La Plata', postalCode: '1900', items: [{ productId: created.data.id, quantity: 1 }],
+    idempotencyKey: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', trackingToken: 'a'.repeat(43),
   } });
   assert.equal(hiddenOrder.response.status, 400);
   const hiddenQuote = await rewrittenApi('/api/quotes', { method: 'POST', body: {

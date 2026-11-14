@@ -5,8 +5,8 @@ export const QUERIES = Object.freeze({
   q004: "INSERT INTO order_events (id, order_id, event_type, details_json, created_at) SELECT ?, ?, ?, ?, ? WHERE changes() > 0",
   q005: "INSERT INTO order_items (id, order_id, product_id, product_slug, product_name, unit_price_cents, quantity, line_total_cents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   q006: "INSERT INTO orders (id, tracking_token_hash, customer_name, email, phone, address, province, locality, postal_code, notes, subtotal_cents, freight_cents, total_cents, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'received', ?, ?)",
-  q007: "INSERT INTO payments (id, order_id, method, amount_cents, status, created_at) VALUES (?, ?, 'transfer', ?, 'pending_verification', ?)",
-  q008: "INSERT INTO payments (id, order_id, method, amount_cents, status, provider_preference_id, checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', ?, ?, ?)",
+  q007: "INSERT INTO payments (id, order_id, method, amount_cents, status, active_request, created_at) VALUES (?, ?, 'transfer', ?, 'pending_verification', 1, ?)",
+  q008: "INSERT INTO payments (id, order_id, method, amount_cents, status, active_request, provider_preference_id, checkout_url, created_at) VALUES (?, ?, 'mercadopago', ?, 'pending', 1, ?, ?, ?)",
   q009: "INSERT INTO products (id, slug, name, short_description, specifications, retail_price_cents, availability, image_url, technical_pdf_url, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
   q010: "INSERT INTO quotes (id, company_name, contact_name, cuit, email, phone, destination, items_json, notes, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
   q011: "SELECT * FROM orders ORDER BY created_at DESC LIMIT 500",
@@ -38,7 +38,7 @@ export const QUERIES = Object.freeze({
   q037: "UPDATE orders SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
   q038: "UPDATE payments SET status = 'confirmed', confirmed_at = ? WHERE id = ? AND status = 'pending_verification' AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND status = 'awaiting_payment' AND freight_accepted_at IS NOT NULL)",
   q039: "UPDATE payments SET status = 'confirmed', provider_payment_id = ?, confirmed_at = ? WHERE id = ? AND status = 'pending' AND EXISTS (SELECT 1 FROM orders WHERE id = ? AND freight_accepted_at IS NOT NULL AND freight_cents IS NOT NULL AND status IN ('awaiting_payment','freight_quoted'))",
-  q040: "UPDATE payments SET status = 'failed', provider_payment_id = ? WHERE id = ?",
+  q040: "UPDATE payments SET status = 'failed', provider_payment_id = ?, active_request = 0 WHERE id = ?",
   q041: "UPDATE products SET active = 0, updated_at = ? WHERE id = ?",
   q042: "UPDATE products SET slug = ?, name = ?, short_description = ?, specifications = ?, retail_price_cents = ?, availability = ?, image_url = ?, technical_pdf_url = ?, active = ?, updated_at = ? WHERE id = ?",
   q043: "UPDATE quotes SET status = ?, updated_at = ? WHERE id = ?",
@@ -71,6 +71,9 @@ export const QUERIES = Object.freeze({
   q070: "SELECT id FROM subcategories WHERE category_id = ? AND name = ?",
   q071: "SELECT position FROM product_images WHERE product_id = ? AND active = 1 ORDER BY position",
   q072: "UPDATE products SET visible_in_store = ? WHERE id = ? AND active = 1",
+  q073: "SELECT id, tracking_token_hash, subtotal_cents, idempotency_fingerprint FROM orders WHERE idempotency_key_hash = ?",
+  q074: "INSERT INTO orders (id, tracking_token_hash, idempotency_key_hash, idempotency_fingerprint, customer_name, email, phone, address, province, locality, postal_code, notes, subtotal_cents, freight_cents, total_cents, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 'received', ?, ?)",
+  q075: "SELECT * FROM payments WHERE id = ?",
 });
 const IDS = new Map(Object.entries(QUERIES).map(([id, sql]) => [normalize(sql), id]));
 function normalize(sql) { return String(sql).replace(/\s+/g, ' ').trim(); }

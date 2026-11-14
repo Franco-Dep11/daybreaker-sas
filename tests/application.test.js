@@ -80,11 +80,20 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   assert.equal((await api('/api/admin/quotes', { auth: true })).data[0].id, quote.data.id);
   assert.equal((await api(`/api/admin/quotes/${quote.data.id}/status`, { method: 'PUT', auth: true, body: { status: 'responded' } })).response.status, 200);
 
-  const orderResult = await api('/api/orders', { method: 'POST', body: {
+  const orderBody = {
     customerName: 'Cliente de prueba', email: 'cliente@example.com', phone: '1122334455', address: 'Calle 123',
     province: 'Buenos Aires', locality: 'La Plata', postalCode: '1900', items: [{ productId: product.id, quantity: 2 }],
-  } });
+    idempotencyKey: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', trackingToken: 'b'.repeat(43),
+  };
+  const orderResult = await api('/api/orders', { method: 'POST', body: orderBody });
   assert.equal(orderResult.response.status, 201);
+  const retryOrder = await api('/api/orders', { method: 'POST', body: orderBody });
+  assert.equal(retryOrder.response.status, 200);
+  assert.equal(retryOrder.data.id, orderResult.data.id);
+  assert.equal(retryOrder.data.trackingUrl, orderResult.data.trackingUrl);
+  const conflictingRetry = await api('/api/orders', { method: 'POST', body: { ...orderBody, notes: 'otro pedido' } });
+  assert.equal(conflictingRetry.response.status, 409);
+  assert.equal((await api('/api/admin/orders', { auth: true })).data.length, 1);
   assert.equal((await api('/api/admin/orders', { auth: true })).data[0].id, orderResult.data.id);
   const token = orderResult.data.trackingUrl.split('#')[1];
   const track = body => api('/api/track', { method: 'POST', body });
@@ -108,6 +117,10 @@ test('productos, pedido, cotización, sesión, flete, seguimiento y confirmació
   const payment = await api('/api/track/payment', { method: 'POST', body: { id: orderResult.data.id, token, method: 'transfer' } });
   assert.equal(payment.response.status, 201);
   assert.equal(payment.data.payment.status, 'pending_verification');
+  const repeatedPayment = await api('/api/track/payment', { method: 'POST', body: { id: orderResult.data.id, token, method: 'transfer' } });
+  assert.equal(repeatedPayment.response.status, 200);
+  assert.equal(repeatedPayment.data.payment.id, payment.data.payment.id);
+  assert.equal((await track({ id: orderResult.data.id, token })).data.payments.length, 1);
   const confirmPath = `/api/admin/payments/${payment.data.payment.id}/confirm`;
   assert.equal((await api(confirmPath, { method: 'PUT', auth: true })).response.status, 200);
   const repeated = await api(confirmPath, { method: 'PUT', auth: true });
