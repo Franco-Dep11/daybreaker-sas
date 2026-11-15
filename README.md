@@ -1,144 +1,152 @@
-# DAYBREAKER SAS · Base comercial
+# DAYBREAKER S.A.S.
 
-Maqueta funcional de una plataforma comercial con catálogo minorista, pedidos con flete a cotizar y solicitudes mayoristas separadas. La aplicación usa Node.js y SQLite sin dependencias externas.
+Aplicación comercial para catálogo minorista, pedidos con flete cotizado, presupuestos mayoristas y panel administrativo. El frontend y la API Node.js se alojan en Vercel; la API de D1 se autentica servidor a servidor ante un Cloudflare Worker con secreto compartido y el Worker accede a D1 y R2 con bindings nativos. La lectura de imágenes es pública; el navegador nunca recibe el secreto del Worker.
 
-## Requisitos y puesta en marcha
+## Estado actual
 
-- Node.js 22.13 o superior.
-- En PowerShell, copiá `.env.example` como `.env` y configurá `ADMIN_USER` (por defecto, `admin`) y `ADMIN_PASSWORD` con una clave única de al menos 16 caracteres.
-- Ejecutá `npm.cmd start` y abrí `http://localhost:3000`.
+- La rama `feature/cloudflare-d1` alimenta Vercel Preview. El commit `f0f1f585` agregó renderizado público indexable, metadatos, sitemap, `noindex` para Preview y analítica GA4 optativa.
+- El entorno Cloudflare de desarrollo existente es `daybreaker-d1-dev`, base `daybreaker-sas-dev` y bucket `daybreaker-product-images`; Wrangler está configurado para esos recursos en `wrangler.toml`.
+- La producción debe usar una D1, un bucket R2, un Worker, un secreto D1 y variables Vercel distintos. No se crearon esos recursos.
+- Los pagos permanecen desactivados si no se configuran variables bancarias ni credenciales de Mercado Pago. Para este primer lanzamiento, dejalas sin configurar.
+- Los presupuestos se gestionan manualmente desde el panel. El sitio no envía avisos por email ni WhatsApp automáticamente.
 
-No hace falta instalar paquetes npm. La base SQLite se crea en `data/daybreaker.sqlite` al iniciar. El catálogo empieza vacío para evitar inventar productos o precios.
+## Desarrollo y pruebas
 
-## Publicación de vista previa en Vercel
-
-El repositorio incluye `vercel.json` y una función Node.js para publicar la web. Importá el repositorio `Daybreaker_SaaS_Pagina_Web` en Vercel; usá Node.js 24 y dejá vacíos el comando de compilación y el directorio de salida.
-
-Vercel ejecuta la aplicación y persiste los datos en Cloudflare D1 a través del Worker incluido en `cloudflare/worker.js`. El backend envía identificadores de consultas permitidas y parámetros enlazados; el Worker no acepta SQL arbitrario. Vercel nunca usa SQLite ni `/tmp` como alternativa. El backend de Vercel se niega a iniciar si faltan `D1_PROXY_URL`, `D1_PROXY_SECRET` o `D1_PROXY_VERIFIED=true`.
-
-## Cloudflare D1
-
-La migración inicial está en `migrations/0001_initial.sql` y conserva las siete tablas, claves, restricciones e índices de SQLite. La revisión local encontró cero registros y `PRAGMA integrity_check` devolvió `ok`; por eso no se requiere importar filas existentes y no se sobrescribieron datos. La migración remota debe ejecutarse sólo después de verificar que `daybreaker-sas-dev` es la base correcta.
-
-Para desarrollo del Worker, instalá Wrangler en tu entorno y creá `.dev.vars` a partir de `.dev.vars.example` con un secreto aleatorio privado:
+Se requiere Node.js 24.x. La app local usa SQLite y no necesita paquetes npm para ejecutarse:
 
 ```powershell
-Copy-Item .dev.vars.example .dev.vars
-npx wrangler d1 migrations apply daybreaker-sas-dev --local
-npx wrangler dev
+Copy-Item .env.example .env
+npm.cmd start
 ```
 
-La aplicación Node local sigue usando SQLite por defecto. Para probar la aplicación local contra un Worker local, configurá `D1_PROXY_URL=http://127.0.0.1:8787` y el mismo `D1_PROXY_SECRET` en `.env`; quitá esas variables para volver a SQLite.
-
-Antes de migrar, inspeccioná la base remota. Si aparecen tablas de la aplicación o datos que no esperabas, detenete y no apliques la migración:
+Configurá una clave local `ADMIN_PASSWORD` de al menos 16 caracteres antes de usar el panel. `.env`, `.dev.vars`, bases locales, copias de seguridad y cachés de herramientas no deben versionarse.
 
 ```powershell
-npx wrangler d1 execute daybreaker-sas-dev --remote --command "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-npx wrangler d1 migrations list daybreaker-sas-dev --remote
+npm.cmd test
+npm.cmd run verify:d1
 ```
 
-Después de autenticar Wrangler con tu cuenta Cloudflare y confirmar que no hay tablas/datos que deban conservarse, aplicá la migración y desplegá el Worker:
+`verify:d1` requiere `D1_PROXY_URL` y `D1_PROXY_SECRET` en el entorno local; solo verifica una consulta autenticada. No cambies `.env` de desarrollo para conectarlo accidentalmente a producción.
 
-```powershell
-npx wrangler d1 migrations apply daybreaker-sas-dev --remote
-npx wrangler deploy
-npx wrangler secret put D1_API_SECRET
-```
+## Preparar Cloudflare Production
 
-El Worker publicado rechaza toda llamada mientras no tenga el secreto. `wrangler secret put` solicita el valor de forma interactiva y publica la configuración sin tener que pegar el secreto en este repositorio ni en el chat. Generá el mismo secreto de alta entropía localmente para usarlo en Vercel. Poné temporalmente `D1_PROXY_URL` y `D1_PROXY_SECRET` en tu `.env` local y ejecutá `npm.cmd run verify:d1`; el comando sólo envía una comprobación autenticada `SELECT 1`. En el proyecto de Vercel, agregá como variables de entorno para Production (y Preview si corresponde):
+El archivo [wrangler.production.example.toml](wrangler.production.example.toml) es una plantilla incompleta. No lo despliegues hasta crear la D1 y el bucket de producción, reemplazar el marcador de `database_id` por el ID que entrega Cloudflare y revisar los nombres. Los nombres propuestos son `daybreaker-sas-prod`, `daybreaker-product-images-prod` y `daybreaker-d1-prod`; no se han creado.
 
-- `D1_PROXY_URL`: URL HTTPS del Worker desplegado.
-- `D1_PROXY_SECRET`: el secreto compartido, cargado directamente en el panel de Vercel.
-- `D1_PROXY_VERIFIED`: el texto `true`, sólo después de que `npm.cmd run verify:d1` haya pasado.
-- Conservá `ADMIN_PASSWORD`, `PUBLIC_BASE_URL` y las demás variables comerciales ya aprobadas. `ADMIN_USER` es opcional y por defecto vale `admin`; si lo configurás, usá el mismo valor en Preview y Production.
+1. Autenticá Wrangler con la cuenta de DAYBREAKER y creá recursos de producción independientes:
 
-No actives tráfico de producción hasta que el Worker esté desplegado, la migración remota figure aplicada, la verificación de conexión sea correcta y se haya redeplegado Vercel con las tres variables. No se configuran cobros reales durante esta migración.
+   ```powershell
+   npx wrangler login
+   npx wrangler d1 create daybreaker-sas-prod
+   npx wrangler r2 bucket create daybreaker-product-images-prod
+   ```
 
-## Flujos incluidos
+2. Guardá el ID de D1 en una copia local de la plantilla llamada `wrangler.production.toml`. No reutilices el ID de desarrollo. La plantilla configura los bindings `DB` y `ASSETS` para esta instalación.
+3. Antes de aplicar una migración, confirmá que la base objetivo es `daybreaker-sas-prod`, inspeccioná su estado y creá una copia de seguridad. Aplicá las migraciones versionadas `0001` a `0004` solo sobre esa base nueva:
 
-- Menú público con Inicio, Quiénes somos, Catálogo, Presupuestos mayoristas, Carrito y seguimiento, y Contacto.
-- Fichas de producto con URLs legibles, metadatos y páginas en el sitemap.
-- Precios en pesos guardados como centavos; el servidor recalcula los importes desde los precios vigentes y guarda una copia del nombre, precio y cantidad en cada pedido.
-- Compra sin registro. El envío se solicita antes del pago; el panel registra el flete y el cliente debe aceptar el total final.
-- Seguimiento con un enlace que contiene un token aleatorio en el fragmento privado de la URL. El código de pedido por sí solo no permite consultar información.
-- Cotizaciones mayoristas en una tabla y flujo separados de los pedidos minoristas.
-- Panel con acceso de servidor, productos editables, archivo lógico del producto, gestión de pedidos, pagos y cotizaciones.
-- Transferencia bancaria con estado pendiente hasta que un administrador verifique la acreditación.
-- Mercado Pago preparado con creación de preferencia en servidor solo después de aceptar el flete. El retorno del navegador no confirma el pago: el webhook debe ser válido y el servidor vuelve a consultar a Mercado Pago para revisar estado, referencia, moneda e importe.
+   ```powershell
+   npx wrangler --config wrangler.production.toml d1 migrations list daybreaker-sas-prod --remote
+   npx wrangler --config wrangler.production.toml d1 migrations apply daybreaker-sas-prod --remote
+   ```
 
-## Configuración operativa pendiente
+4. Generá un secreto aleatorio nuevo para Production, de al menos 32 bytes. Cargalo interactivamente en el Worker; no lo pongas en el TOML, Git, una orden visible en pantalla ni el chat:
 
-Los datos siguientes deben ser provistos o aprobados por DAYBREAKER antes de habilitarse:
+   ```powershell
+   npx wrangler --config wrangler.production.toml secret put D1_API_SECRET
+   npx wrangler --config wrangler.production.toml deploy
+   ```
 
-- Productos, precios vigentes, disponibilidad, especificaciones, imágenes y fichas PDF.
-- `PUBLIC_BASE_URL` con dominio definitivo y HTTPS para publicación.
-- Titularidad, CBU, banco y alias en las variables `BANK_*`.
-- Credenciales de la cuenta de Mercado Pago en `MERCADOPAGO_ACCESS_TOKEN` y `MERCADOPAGO_WEBHOOK_SECRET`.
-- Email y número de WhatsApp comercial autorizados en `CONTACT_EMAIL` y `WHATSAPP_PHONE`.
-- Servicio de email para alertas automáticas, dominio/DNS, Search Console y textos legales aprobados.
-- Reglas para emitir y vencer cotizaciones de flete; facturación, impuestos, privacidad, cambios y devoluciones.
-- Hosting con almacenamiento persistente para SQLite, HTTPS, restauración de copias y administración bajo control de DAYBREAKER.
+   El `D1_API_SECRET` de Production debe ser distinto al de desarrollo. El Worker Production debe estar desplegado y verificado antes de conectar Vercel.
 
-La maqueta no envía avisos automáticos por email ni automatiza WhatsApp porque aún no se definieron un proveedor de mensajería ni sus credenciales. El panel conserva las solicitudes; permite responder presupuestos por email o WhatsApp manual cuando esos datos están configurados.
+## Trasladar el catálogo y las imágenes de desarrollo
 
-## Copias de seguridad
+El traslado es una operación manual, no ejecutada. Exportá solamente `categories`, `subcategories`, `products` y `product_images`; no exportes `orders`, `order_items`, `quotes`, `payments`, `admin_sessions` ni `order_events`. Así no se trasladan pedidos de prueba, contactos, pagos ni sesiones. Los `INSERT` exportados conservan IDs y claves foráneas.
 
-Con la aplicación detenida o desde otra terminal del mismo proyecto, ejecutá `npm.cmd run backup`. El script usa la copia consistente de SQLite y guarda un archivo fechado en `backups/`.
+1. Creá una carpeta de trabajo con acceso restringido **fuera del repositorio** y guardá allí las exportaciones. Primero congelá cambios al catálogo de desarrollo. Exportá cada tabla, sin esquema, usando Wrangler autenticado:
 
-Para restaurar: detené el servidor, conservá aparte la base actual, copiá el archivo elegido a `data/daybreaker.sqlite` y reiniciá. Antes de publicar se debe definir dónde guardar una segunda copia fuera del servidor y quién verifica periódicamente la restauración.
+   ```powershell
+   $work = Join-Path $env:TEMP 'daybreaker-catalog-transfer'
+   New-Item -ItemType Directory -Force $work | Out-Null
+   npx wrangler d1 export daybreaker-sas-dev --remote --table=categories --no-schema --output="$work\01-categories.sql"
+   npx wrangler d1 export daybreaker-sas-dev --remote --table=subcategories --no-schema --output="$work\02-subcategories.sql"
+   npx wrangler d1 export daybreaker-sas-dev --remote --table=products --no-schema --output="$work\03-products.sql"
+   npx wrangler d1 export daybreaker-sas-dev --remote --table=product_images --no-schema --output="$work\04-product-images.sql"
+   ```
 
-## Antes de publicar
+   Antes de cambiar esquema o importar, hacé también un respaldo completo de la base objetivo, incluso si esperás que esté vacía:
 
-Esta base sirve para revisar el flujo y completar datos. La instalación de producción necesita dominio y HTTPS, gestión de credenciales en el alojamiento, política de copias externa, cuenta administrativa individual para cada responsable, notificaciones de email configuradas y probadas, datos legales aprobados y validación integral de pagos y operaciones con cuentas de prueba. No habilites cobros hasta configurar y verificar Mercado Pago, transferencia y reglas de flete con DAYBREAKER.
+   ```powershell
+   npx wrangler d1 export daybreaker-sas-prod --remote --output="$work\production-before-transfer.sql"
+   ```
 
-Las cuentas y dominios deben quedar bajo titularidad o control de DAYBREAKER. Código, base y documentación están en el proyecto para facilitar la migración.
+2. Verificá en producción que las cuatro tablas objetivo estén vacías. Si alguna contiene filas, **detenete**: no ejecutes los `INSERT` ni sobrescribas nada; primero se necesita una conciliación manual de IDs y slugs.
+3. Para cada `object_key` no nulo de `product_images`, descargá el objeto del bucket de desarrollo y cargalo en el bucket de producción bajo la misma clave. Wrangler trabaja un objeto por comando; los archivos de este sitio tienen un límite de 4 MB:
 
-## Catalogo administrativo y almacenamiento de imagenes
+   ```powershell
+   $key = 'products/<product-uuid>/<image-uuid>.jpg' # repetí usando cada object_key obtenido de D1
+   npx wrangler r2 object get "daybreaker-product-images/$key" --file="$work\image.jpg"
+   npx wrangler r2 object put "daybreaker-product-images-prod/$key" --file="$work\image.jpg" --content-type=image/jpeg
+   ```
 
-La migracion aditiva `migrations/0002_admin_catalog.sql` agrega categorias, subcategorias, stock informativo, visibilidad independiente del archivado, atributos flexibles y hasta seis registros de imagen por producto. Tambien copia los valores existentes de `image_url` a la tabla de imagenes sin borrar la columna original ni reemplazar registros.
+   Elegí `image/png` o `image/webp` según la extensión real. No subas sobre una clave existente: comprobá primero que el bucket nuevo esté vacío. Repetí para todas las claves, incluidas imágenes inactivas referenciadas por filas existentes.
+4. En los cuatro SQL exportados, reemplazá el origen del Worker de desarrollo por la URL `workers.dev` que Cloudflare asignó al Worker Production, conservando `/assets/<object_key>`. Esto actualiza las URLs guardadas de R2 sin cambiar las claves de objeto. Revisá también cualquier URL externa de imagen/PDF para conservarla tal cual.
+5. Importá en este orden, solo tras confirmar que la base y bucket son los de Production y que las tablas están vacías:
 
-No se ejecuto ninguna migracion remota ni se desplego el Worker. Cuando autorices el cambio remoto, el orden es: aplicar `0002` sobre D1; crear el bucket R2; agregar el binding al `wrangler.toml`; desplegar el Worker actualizado; y luego publicar la rama en Vercel Preview. No despliegues el backend actualizado antes de la migracion y del Worker porque consulta columnas y operaciones que aun no existen en el esquema desplegado.
+   ```powershell
+   npx wrangler --config wrangler.production.toml d1 execute daybreaker-sas-prod --remote --file="$work\01-categories.sql"
+   npx wrangler --config wrangler.production.toml d1 execute daybreaker-sas-prod --remote --file="$work\02-subcategories.sql"
+   npx wrangler --config wrangler.production.toml d1 execute daybreaker-sas-prod --remote --file="$work\03-products.sql"
+   npx wrangler --config wrangler.production.toml d1 execute daybreaker-sas-prod --remote --file="$work\04-product-images.sql"
+   ```
 
-Para habilitar cargas, crea un bucket privado desde Cloudflare R2 (por ejemplo `daybreaker-product-images`) y agrega al `wrangler.toml`:
+6. Compará las cantidades de las cuatro tablas entre origen y destino; ejecutá `PRAGMA foreign_key_check;`; probá las URLs de imagen desde el Worker Production y revisá categorías, subcategorías, precios y fichas en Preview conectado al Worker Production. No borres ni limpies la fuente de desarrollo.
+7. Conservá los SQL de transferencia en un almacenamiento privado hasta terminar la validación; después eliminá esa carpeta de trabajo con el procedimiento seguro de DAYBREAKER. No la copies a `backups/` ni la agregues a Git.
 
-```toml
-[[r2_buckets]]
-binding = "ASSETS"
-bucket_name = "daybreaker-product-images"
-```
+La exportación SQL de una D1 puede bloquear consultas mientras corre. Hacela en una ventana coordinada y no ejecutes esta operación durante actividad comercial. Wrangler exporta datos; R2 requiere la copia separada de objetos descrita arriba. [Documentación D1 de exportación e importación](https://developers.cloudflare.com/d1/best-practices/import-export-data/) y [comandos Wrangler de R2](https://developers.cloudflare.com/workers/wrangler/commands/r2/).
 
-Despues despliega el Worker desde esta rama y conserva `D1_API_SECRET` configurado como secreto. No se necesita una clave R2 adicional: el Worker accede al bucket mediante el binding nativo. Las cargas se autentican desde la sesion administrativa de Vercel y el Worker verifica el secreto servidor a servidor; el navegador no recibe el secreto. Se aceptan JPEG, PNG y WebP de hasta 4 MB cada uno. Los objetos se sirven publicamente por URL para que las fichas comerciales los muestren; el bucket no permite listado publico.
+## Variables de Vercel
 
-La interfaz permite asociar URL HTTPS existentes aun antes de configurar R2. Las cargas de archivos responden con error explicito hasta que exista el binding. En desarrollo SQLite, productos, categorias y metadatos persisten localmente; las cargas requieren que el Worker y R2 esten configurados.
-En tu equipo, luego de decidir habilitarlo, crea el bucket con `npx wrangler r2 bucket create daybreaker-product-images` y agrega el binding `ASSETS` indicado arriba. Para D1 ejecuta `npx wrangler d1 migrations apply daybreaker-sas-dev --remote`; despues de crear el binding y revisar el diff, despliega el Worker con `npx wrangler deploy`. Por ultimo, publica esta rama en Vercel Preview. No ejecutes los comandos remotos hasta autorizar ese cambio.
+En **Settings → Environment Variables**, crear variables diferentes por entorno. Production requiere:
 
-## SEO y analítica web
+| Variable | Valor / regla |
+| --- | --- |
+| `D1_PROXY_URL` | URL HTTPS del Worker `daybreaker-d1-prod` |
+| `D1_PROXY_SECRET` | El valor del secreto `D1_API_SECRET` de Production; separado de Preview |
+| `D1_PROXY_VERIFIED` | `true` solo después de que `npm.cmd run verify:d1` confirme `SELECT 1` autenticado desde una máquina controlada, apuntando al Worker Production |
+| `ADMIN_PASSWORD` | Contraseña única, privada, de 16+ caracteres |
+| `ADMIN_USER` | Recomendado: usuario elegido; si se omite, el código usa `admin` |
+| `PUBLIC_BASE_URL` | Origen HTTPS definitivo, sin path, por ejemplo `https://<dominio-real>` |
+| `CONTACT_EMAIL`, `WHATSAPP_PHONE` | Canales comerciales reales aprobados |
 
-Las rutas públicas entregan HTML inicial con su H1, descripción, enlaces rastreables y metadatos antes de que cargue `app.js`. Las fichas se generan desde productos activos y visibles en D1; las páginas de carrito, pago, seguimiento, el catálogo vacío y las vistas Preview reciben `noindex` mediante meta y/o `X-Robots-Tag`. El sitemap se genera desde el catálogo actual y excluye carrito, pago, seguimiento, administración, productos ocultos y archivados. Las fichas incluyen JSON-LD `Product` y `BreadcrumbList`; el `Offer` aparece solo para productos con disponibilidad `available` y aclara que el flete se cotiza aparte.
+No configures `BANK_ACCOUNT_HOLDER`, `BANK_NAME`, `BANK_CBU`, `BANK_ALIAS`, `BANK_CUIT`, `MERCADOPAGO_ACCESS_TOKEN` ni `MERCADOPAGO_WEBHOOK_SECRET` para esta primera etapa. Sin esos valores, el checkout no habilita cobros online. GA4 es optativo: solo después de aprobar privacidad/consentimiento, agregá `GA4_MEASUREMENT_ID` en Production; mantenelo ausente en Preview.
 
-Para indexación, configurá `PUBLIC_BASE_URL` en Vercel Production con el origen HTTPS definitivo (por ejemplo `https://dominio-aprobado.example`, reemplazándolo por el dominio real). Si falta en Production, el servidor aplica `noindex` hasta que exista una URL canónica confiable. Los despliegues Preview siempre envían `X-Robots-Tag: noindex, nofollow`, aunque el contenido de prueba sea accesible.
+Agregá primero las variables de Preview apuntando **solo** a D1/R2/Worker de desarrollo. Probá todo allí. Las variables nuevas o editadas se aplican al siguiente deployment, por lo que hay que generar un Preview/Production nuevo después de guardarlas ([documentación Vercel](https://vercel.com/docs/environment-variables)). No copies valores de secretos entre entornos salvo que sea intencional; para Worker, la clave debe coincidir solo con su Vercel correspondiente.
 
-### Google Analytics 4
+## Dominio, SEO y Search Console
 
-La integración es opcional y no envía datos mientras `GA4_MEASUREMENT_ID` esté vacío. Para activarla, obtené el ID `G-...` de la propiedad GA4 de DAYBREAKER y agregalo únicamente en el entorno Vercel Production. El backend suprime el ID en Preview. La etiqueta no se descarga hasta que la persona acepte analítica; puede cambiar la preferencia desde el pie de página. El texto del aviso es un borrador técnico y necesita aprobación comercial/legal antes de producción.
+1. En Vercel, agregá el dominio aprobado en **Settings → Domains**. Configurá en el proveedor DNS los registros que Vercel indique; no uses valores copiados de otra instalación.
+2. En `PUBLIC_BASE_URL`, guardá el origen final HTTPS y generá un nuevo deployment. La web aplica `noindex` en Preview y también en Production mientras falte esa variable.
+3. En el dominio real comprobá portada, `/catalogo`, una ficha visible, `/robots.txt` y `/sitemap.xml`. Confirmá status 200, canonical del dominio final y ausencia de `noindex` en páginas públicas. Carrito, pagos, seguimiento y admin deben permanecer en `noindex`.
+4. Verificá el dominio raíz en Google Search Console mediante el registro TXT que Google proporciona; luego enviá `https://<dominio-real>/sitemap.xml` e inspeccioná portada, catálogo y una ficha. La propiedad y el sitemap no se han verificado ni enviado.
+5. Si GA4 se habilita, desactivá **Medición mejorada → Vistas de página → Cambios de página basados en eventos del historial** porque la SPA ya envía vistas manualmente. No cargues Analytics hasta obtener aprobación del texto de consentimiento.
 
-La navegación SPA envía `page_view` manuales con medición automática desactivada en `gtag`. Para evitar duplicados, en GA4 abrí **Administrador → Flujos de datos → Web → Medición mejorada → Vistas de página → Configuración avanzada** y desactivá **Cambios de página basados en eventos del historial del navegador**. La documentación oficial advierte que esa opción puede seguir enviando vistas aunque `send_page_view` sea `false`: [medir vistas de página](https://developers.google.com/analytics/devguides/collection/ga4/views?technology=websites) y [medir una SPA](https://developers.google.com/analytics/devguides/collection/ga4/single-page-applications).
+Más detalles: [verificación DNS de Search Console](https://support.google.com/webmasters/answer/9008080), [propiedades de Search Console](https://support.google.com/webmasters/answer/34592) y [vistas GA4](https://developers.google.com/analytics/devguides/collection/ga4/views?technology=websites).
 
-Se preparan `view_item`, `add_to_cart`, `begin_checkout`, `generate_lead` y `purchase`. `purchase` solo se envía cuando el seguimiento recibe el estado de pedido `payment_confirmed`; el flete se registra separado del valor de productos. Los eventos no incluyen nombre, correo, teléfono, domicilio, token, query string ni fragmento privado. La opción de consentimiento comienza con almacenamiento denegado y no implementa publicidad personalizada.
+## Respaldos, recuperación y reversión
 
-Pasos manuales para GA4:
+- **D1:** antes de migraciones o importaciones, exportá la base remota completa a un archivo fuera del repositorio y cifralo con el mecanismo corporativo. Ejemplo de exportación: `npx wrangler d1 export daybreaker-sas-prod --remote --output="$work\daybreaker-prod.sql"`. Ese archivo incluye datos personales y sesiones hasheadas: limitar acceso, no subirlo a Git ni compartirlo en chat. Verificá la opción de recuperación temporal/Time Travel habilitada en la cuenta y su retención antes de depender de ella. Para restaurar, creá una D1 vacía de recuperación, configurá temporalmente un TOML local con su ID, importá el archivo con `wrangler d1 execute <db-recuperacion> --remote --file=<copia-sql>`, revisá esquema, integridad y conteos y probá con una copia aislada del Worker. Solo tras aprobación cambiá el binding del Worker; no importes sobre la base con tráfico.
+- **R2:** registrá las claves con `object_key` desde D1 y descargá/copiá los objetos a una ubicación privada separada. Comprueba conteos y aperturas de muestra antes de eliminar cualquier copia. Las imágenes de producto no se recuperan con la exportación D1.
+- **Código:** anota commit, deployment Vercel, versión Worker y migraciones aplicadas. Si falla una publicación, vuelve Vercel al último deployment validado desde Deployments. Para cambios de esquema/datos, no intentes invertir migraciones destructivamente: restaura en recursos aislados, valida y cambia la URL del Worker solo con autorización.
+- **Antes de cada cambio:** detenerse ante discrepancias de entorno, respaldar, aplicar una sola etapa, verificar y continuar. No ejecutar operaciones remotas sobre `daybreaker-sas-dev` cuando el objetivo sea Production.
 
-1. Crear la propiedad y el flujo Web bajo la cuenta de DAYBREAKER, y copiar el ID de medición `G-...` a la variable Production `GA4_MEASUREMENT_ID` en Vercel.
-2. No configurar esa variable en Preview. Después de publicar Production, probar el aviso de consentimiento y revisar `page_view` y eventos aprobados en DebugView.
-3. Confirmar que no aparece ninguna solicitud a Google Analytics antes de aceptar; probar rechazo y revocación desde **Preferencias de analítica**.
+## Seguridad y pendientes de lanzamiento
 
-### Google Search Console
+- El backend valida sesión administrativa en cada ruta `/api/admin/*`; la cookie es `HttpOnly`, `SameSite=Strict` y `Secure` en producción. Nunca se guardan contraseñas en base ni se exponen secretos en el navegador.
+- El código también limita intentos de login en memoria por instancia. En Vercel serverless ese límite no es global ni persistente: antes de abrir el panel a Internet, configurá y observá una regla Vercel Firewall de rate limit para `POST /api/admin/login` (por IP; empezar en modo de registro y después activar 429, por ejemplo con un umbral de 8 intentos/10 min). La interfaz del Firewall permite reglas de rate limit y pruebas en tráfico; consultá [WAF Rate Limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting). No se configuró la regla.
+- Seguimiento usa token aleatorio privado; el ID de pedido no basta. No enviar enlaces de seguimiento ni datos personales a Analytics.
+- El sistema no emite correo automático, facturas ni avisos de WhatsApp; confirmar cómo responder pedidos y presupuestos manualmente.
+- Antes de vender: aprobar razón social, contacto, privacidad, términos, cambios/devoluciones, facturación/impuestos, cobertura de flete, operación y tiempos de respuesta. No inventar promesas de stock, entrega ni cobertura.
+- Validar compra, aceptación de flete, estado de pago deshabilitado, seguimiento, categorías e imágenes desde Preview conectado a desarrollo. Luego hacer una prueba de extremo a extremo controlada en Production **sin cobro real** antes de anunciar la tienda.
 
-No se verificó la propiedad ni se presentó el sitemap desde una cuenta de Google. Cuando el dominio definitivo esté aprobado:
+## Limpieza local
 
-1. En Search Console, agregá una propiedad de tipo **Dominio** para el dominio raíz y copiá el registro TXT que Google muestra.
-2. En el proveedor DNS del dominio, agregá ese TXT sin modificar otros registros. Esperá la propagación y pulsá **Verificar**. La propiedad Dominio usa verificación DNS: [ayuda oficial de verificación](https://support.google.com/webmasters/answer/9008080) y [agregar una propiedad](https://support.google.com/webmasters/answer/34592).
-3. En **Sitemaps**, enviá `https://<dominio-definitivo>/sitemap.xml`; reemplazá el marcador por el dominio real.
-4. Inspeccioná la portada, `/catalogo` y al menos una ficha visible. Confirmá que la URL probada sea canónica, responda 200 y no tenga `noindex`. No envíes URLs Preview.
-
-La indexación de producción debe habilitarse después de configurar el dominio y `PUBLIC_BASE_URL`, confirmar los datos reales del catálogo, revisar el sitemap en Search Console y aprobar el aviso de privacidad/consentimiento. La publicación no garantiza posiciones ni indexación inmediata.
+Las bases SQLite de `data/`, sus archivos WAL/SHM, todo `backups/`, `.env`, `.dev.vars`, `.git` y el proyecto local `bakugan-battle-brawlers-enhanced/` son datos o trabajo preservado. No se borran como caché. El archivo local principal puede no representar D1; para productos reales, la fuente indicada es `daybreaker-sas-dev`.

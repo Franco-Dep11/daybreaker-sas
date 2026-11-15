@@ -1,0 +1,20 @@
+# PLANTILLA: no desplegar hasta crear los recursos de produccion,
+# reemplazar el database_id y revisar todos los nombres.
+name = "daybreaker-d1-prod"
+main = "cloudflare/worker.js"
+compatibility_date = "2026-11-03"
+workers_dev = true
+preview_urls = false
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "daybreaker-sas-prod"
+database_id = "REEMPLAZAR_CON_EL_ID_DE_D1_PRODUCTION"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "daybreaker-product-images-prod"
