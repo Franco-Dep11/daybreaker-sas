@@ -6,7 +6,9 @@ Aplicación comercial para catálogo minorista, pedidos con flete cotizado, pres
 
 - La rama `feature/cloudflare-d1` alimenta Vercel Preview. El commit `f0f1f585` agregó renderizado público indexable, metadatos, sitemap, `noindex` para Preview y analítica GA4 optativa.
 - El entorno Cloudflare de desarrollo existente es `daybreaker-d1-dev`, base `daybreaker-sas-dev` y bucket `daybreaker-product-images`; Wrangler está configurado para esos recursos en `wrangler.toml`.
-- La producción debe usar una D1, un bucket R2, un Worker, un secreto D1 y variables Vercel distintos. No se crearon esos recursos.
+- Production ya tiene D1 `daybreaker-sas-prod` con las migraciones `0001`–`0004` aplicadas, bucket `daybreaker-product-images-prod` vacío y Worker `daybreaker-d1-prod` desplegado. La configuración independiente está en el archivo local `wrangler.production.toml` (no versionarlo).
+- El Worker Production aún no tiene `D1_API_SECRET`: su API responde cerrado hasta configurarlo. Vercel CLI está sin sesión y no hay un proyecto vinculado localmente; no pude revisar ni modificar variables o deployments Production.
+- La D1 Production está sin registros de catálogo ni operaciones. La inspección de desarrollo encontró cero categorías, cero subcategorías y un único producto de prueba (`producto-de-prueba-d1`) con una imagen. No se trasladó: el brief requiere detenerse ante datos de prueba y consultar antes de importar.
 - Los pagos permanecen desactivados si no se configuran variables bancarias ni credenciales de Mercado Pago. Para este primer lanzamiento, dejalas sin configurar.
 - Los presupuestos se gestionan manualmente desde el panel. El sitio no envía avisos por email ni WhatsApp automáticamente.
 
@@ -28,38 +30,25 @@ npm.cmd run verify:d1
 
 `verify:d1` requiere `D1_PROXY_URL` y `D1_PROXY_SECRET` en el entorno local; solo verifica una consulta autenticada. No cambies `.env` de desarrollo para conectarlo accidentalmente a producción.
 
-## Preparar Cloudflare Production
+## Cloudflare Production
 
-El archivo [wrangler.production.example.toml](wrangler.production.example.toml) es una plantilla incompleta. No lo despliegues hasta crear la D1 y el bucket de producción, reemplazar el marcador de `database_id` por el ID que entrega Cloudflare y revisar los nombres. Los nombres propuestos son `daybreaker-sas-prod`, `daybreaker-product-images-prod` y `daybreaker-d1-prod`; no se han creado.
+Ya existen `daybreaker-sas-prod`, `daybreaker-product-images-prod` y `daybreaker-d1-prod`; no vuelvas a crearlos. Se confirmó que D1 estaba vacía antes de migrar. Wrangler aplicó `0001`–`0004`; la lista remota no muestra pendientes y las tablas/índices esperados están presentes. Los conteos comerciales siguen en cero. El respaldo de esquema anterior a la importación está en `backups/daybreaker-sas-prod-before-catalog-2026-11-17.sql` y es local/ignorado.
 
-1. Autenticá Wrangler con la cuenta de DAYBREAKER y creá recursos de producción independientes:
+El Worker se desplegó con bindings `DB` y `ASSETS`. La verificación de compilación en seco pasó. No hay secretos configurados y no se verificó todavía una consulta autenticada Worker→D1. La comprobación `PRAGMA foreign_key_check` no devolvió filas; Cloudflare rechazó `PRAGMA integrity_check` con `SQLITE_AUTH`, por lo que esa comprobación no pudo completarse directamente.
 
-   ```powershell
-   npx wrangler login
-   npx wrangler d1 create daybreaker-sas-prod
-   npx wrangler r2 bucket create daybreaker-product-images-prod
-   ```
-
-2. Guardá el ID de D1 en una copia local de la plantilla llamada `wrangler.production.toml`. No reutilices el ID de desarrollo. La plantilla configura los bindings `DB` y `ASSETS` para esta instalación.
-3. Antes de aplicar una migración, confirmá que la base objetivo es `daybreaker-sas-prod`, inspeccioná su estado y creá una copia de seguridad. Aplicá las migraciones versionadas `0001` a `0004` solo sobre esa base nueva:
-
-   ```powershell
-   npx wrangler --config wrangler.production.toml d1 migrations list daybreaker-sas-prod --remote
-   npx wrangler --config wrangler.production.toml d1 migrations apply daybreaker-sas-prod --remote
-   ```
-
-4. Generá un secreto aleatorio nuevo para Production, de al menos 32 bytes. Cargalo interactivamente en el Worker; no lo pongas en el TOML, Git, una orden visible en pantalla ni el chat:
+La intervención de secreto es necesaria. Generá una clave aleatoria nueva de al menos 32 bytes y cargá el mismo valor de forma privada en el secreto del Worker y en Vercel Production. No lo pongas en TOML, Git, una orden visible ni el chat. En una terminal segura:
 
    ```powershell
    npx wrangler --config wrangler.production.toml secret put D1_API_SECRET
-   npx wrangler --config wrangler.production.toml deploy
    ```
 
-   El `D1_API_SECRET` de Production debe ser distinto al de desarrollo. El Worker Production debe estar desplegado y verificado antes de conectar Vercel.
+El secreto de Production debe ser distinto al de desarrollo. `wrangler secret list --name daybreaker-d1-prod` muestra solo los nombres y actualmente devuelve una lista vacía. Después de cargar el secreto, verificar el endpoint con `npm.cmd run verify:d1` en un entorno controlado y añadir `D1_PROXY_VERIFIED=true` en Vercel solo cuando la verificación pase. El endpoint Vercel de verificación no está configurado en este equipo.
 
 ## Trasladar el catálogo y las imágenes de desarrollo
 
 El traslado es una operación manual, no ejecutada. Exportá solamente `categories`, `subcategories`, `products` y `product_images`; no exportes `orders`, `order_items`, `quotes`, `payments`, `admin_sessions` ni `order_events`. Así no se trasladan pedidos de prueba, contactos, pagos ni sesiones. Los `INSERT` exportados conservan IDs y claves foráneas.
+
+**Estado de esta ejecución:** la fuente tenía 0 categorías, 0 subcategorías, 1 producto identificado como `Producto de prueba D1` (descripción “Prueba de persistencia Cloudflare D1”) y 1 imagen en R2. Se detuvo la importación y no se copió la imagen porque no es un artículo comercial real. Confirmar/cargar los productos reales en desarrollo antes de repetir el traslado.
 
 1. Creá una carpeta de trabajo con acceso restringido **fuera del repositorio** y guardá allí las exportaciones. Primero congelá cambios al catálogo de desarrollo. Exportá cada tabla, sin esquema, usando Wrangler autenticado:
 
